@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SettingsInputComponent
 import androidx.compose.material.icons.filled.VolumeOff
@@ -89,6 +90,7 @@ fun TrackLaneCard(
     onPanChange: (Float) -> Unit,
     onSeek: (Float) -> Unit,
     onOpenRouting: () -> Unit,
+    onOpenPianoRoll: () -> Unit = {},
     onRename: (String) -> Unit,
     onClearAudio: () -> Unit,
     onDeleteTrack: () -> Unit,
@@ -159,33 +161,93 @@ fun TrackLaneCard(
                         )
                     }
 
-                    // Input Device & Channel routing tag
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .padding(top = 2.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(StudioCardElevated)
-                            .clickable { onOpenRouting() }
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                            .testTag("routing_chip_${track.id}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Mic,
-                            contentDescription = "Input Source",
-                            tint = StudioCyan,
-                            modifier = Modifier.size(11.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        val devName = inputDevice?.name ?: "Input Mic"
-                        Text(
-                            text = "$devName • ${track.inputChannelMode.shortLabel}",
-                            color = StudioCyan,
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Medium
-                        )
+                    // Input Device & Channel routing tag OR MIDI synth tag
+                    if (track.type == com.example.model.TrackType.MIDI) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .padding(top = 2.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(StudioYellow.copy(alpha = 0.15f))
+                                .border(1.dp, StudioYellow.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                                .clickable { onOpenPianoRoll() }
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                .testTag("midi_chip_${track.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Piano,
+                                contentDescription = "Piano Roll",
+                                tint = StudioYellow,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "MIDI • ${track.instrument.displayName} (${track.midiNotes.size} notes)",
+                                color = StudioYellow,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .padding(top = 2.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(StudioCardElevated)
+                                .clickable { onOpenRouting() }
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                .testTag("routing_chip_${track.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Input Source",
+                                tint = StudioCyan,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            val devName = inputDevice?.name ?: "Input Mic"
+                            Text(
+                                text = "$devName • ${track.inputChannelMode.shortLabel}",
+                                color = StudioCyan,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
+                }
+
+                // If MIDI track, show dedicated Keys / Piano Roll shortcut button
+                if (track.type == com.example.model.TrackType.MIDI) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(StudioYellow.copy(alpha = 0.2f))
+                            .border(1.dp, StudioYellow, RoundedCornerShape(6.dp))
+                            .clickable { onOpenPianoRoll() }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .testTag("open_keys_btn_${track.id}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Piano,
+                                contentDescription = null,
+                                tint = StudioYellow,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Keys",
+                                color = StudioYellow,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
                 }
 
                 // Arm / Rec button

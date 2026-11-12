@@ -31,9 +31,39 @@ data class AudioInputDevice(
     val nativeDeviceInfo: AudioDeviceInfo? = null
 )
 
+enum class TrackType {
+    AUDIO,
+    MIDI
+}
+
+enum class SynthInstrument(val displayName: String, val category: String) {
+    SYNTH_LEAD("Neon Saw Lead", "Lead"),
+    ELECTRIC_PIANO("FM Electric Piano", "Keys"),
+    BASS_SYNTH("Analog Sub Bass", "Bass"),
+    PAD_STRINGS("Lush Warm Pad", "Pad"),
+    RETRO_8BIT("Chiptune Square", "Retro")
+}
+
+data class MidiNote(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val noteNumber: Int = 60, // 60 = Middle C (C4)
+    val startMs: Long = 0L,
+    val durationMs: Long = 500L,
+    val velocity: Int = 100 // 1..127
+) {
+    val noteName: String
+        get() {
+            val names = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+            val octave = (noteNumber / 12) - 1
+            val name = names[noteNumber % 12]
+            return "$name$octave"
+        }
+}
+
 data class TrackModel(
     val id: String,
     val name: String,
+    val type: TrackType = TrackType.AUDIO,
     val colorHex: Long = TrackColors[0].value.toLong(),
     val inputDeviceId: String = "default_mic",
     val inputChannelMode: InputChannelMode = InputChannelMode.LEFT_OR_CH1,
@@ -45,7 +75,9 @@ data class TrackModel(
     val audioFilePath: String? = null,
     val waveformPoints: List<Float> = emptyList(),
     val durationMs: Long = 0L,
-    val liveMeterLevel: Float = 0.0f // 0f to 1f for reactive VU meters
+    val liveMeterLevel: Float = 0.0f, // 0f to 1f for reactive VU meters
+    val midiNotes: List<MidiNote> = emptyList(),
+    val instrument: SynthInstrument = SynthInstrument.SYNTH_LEAD
 ) {
     val color: Color get() = Color(colorHex.toULong())
 }

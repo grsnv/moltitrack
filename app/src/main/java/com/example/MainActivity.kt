@@ -78,10 +78,12 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.material.icons.filled.Piano
 import com.example.model.TrackModel
 import com.example.ui.components.ExportDialog
 import com.example.ui.components.InputRoutingDialog
 import com.example.ui.components.MasterTransportBar
+import com.example.ui.components.PianoRollModal
 import com.example.ui.components.TrackLaneCard
 import com.example.ui.theme.MultiTrackTheme
 import com.example.ui.theme.StudioBorder
@@ -137,6 +139,7 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
     val session by viewModel.currentSession.collectAsStateWithLifecycle()
     val availableInputs by viewModel.availableInputs.collectAsStateWithLifecycle()
     val connectedUsbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
+    val connectedMidiDevices by viewModel.connectedMidiDevices.collectAsStateWithLifecycle()
     val selectedBufferSize by viewModel.selectedBufferSize.collectAsStateWithLifecycle()
     val selectedSampleRate by viewModel.selectedSampleRate.collectAsStateWithLifecycle()
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
@@ -151,6 +154,8 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
 
     // Dialog States
     var routingTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
+    var pianoRollTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
+    var showAddTrackTypeDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
     var showNewSessionDialog by remember { mutableStateOf(false) }
 
@@ -178,7 +183,7 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                 onPlayPauseToggle = { viewModel.togglePlayPause() },
                 onStop = { viewModel.stopPlayback() },
                 onLoopToggle = { viewModel.toggleLoop() },
-                onAddTrack = { viewModel.addTrack() },
+                onAddTrack = { showAddTrackTypeDialog = true },
                 onExportClick = { showExportDialog = true },
                 modifier = Modifier.testTag("master_transport_bar")
             )
@@ -477,6 +482,7 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                             viewModel.seekTo(targetMs)
                         },
                         onOpenRouting = { routingTrackTarget = track },
+                        onOpenPianoRoll = { pianoRollTrackTarget = track },
                         onRename = { newName -> viewModel.renameTrack(track.id, newName) },
                         onClearAudio = { viewModel.clearTrackAudio(track.id) },
                         onDeleteTrack = { viewModel.deleteTrack(track.id) }
@@ -490,7 +496,7 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
                             .border(1.dp, StudioBorder, RoundedCornerShape(10.dp))
-                            .clickable { viewModel.addTrack() }
+                            .clickable { showAddTrackTypeDialog = true }
                             .padding(vertical = 12.dp)
                             .testTag("add_track_list_button"),
                         color = StudioCard
@@ -508,7 +514,7 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Add New Audio Track",
+                                text = "Add New Track (Audio / MIDI)",
                                 color = StudioCyan,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp
@@ -537,6 +543,120 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
             onSetSampleRate = { viewModel.setSampleRate(it) },
             onRefreshInputs = { viewModel.refreshInputs() },
             onDismiss = { routingTrackTarget = null }
+        )
+    }
+
+    // Add Track Type Selection Dialog (Audio vs MIDI)
+    if (showAddTrackTypeDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddTrackTypeDialog = false },
+            title = {
+                Text(
+                    text = "Add Track",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    color = StudioTextPrimary
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // Option 1: Audio Track
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .border(1.dp, StudioBorder, RoundedCornerShape(10.dp))
+                            .clickable {
+                                viewModel.addTrack()
+                                showAddTrackTypeDialog = false
+                            }
+                            .padding(12.dp)
+                            .testTag("add_audio_track_option"),
+                        color = StudioCardElevated
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(StudioCyan.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Mic, contentDescription = null, tint = StudioCyan, modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Audio Track", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = StudioTextPrimary)
+                                Text("Record from USB Audio interface, built-in mic, or headset", fontSize = 11.sp, color = StudioTextMuted)
+                            }
+                        }
+                    }
+
+                    // Option 2: MIDI Synth Track
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .border(1.dp, StudioYellow.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                            .clickable {
+                                viewModel.addMidiTrack()
+                                showAddTrackTypeDialog = false
+                            }
+                            .padding(12.dp)
+                            .testTag("add_midi_track_option"),
+                        color = StudioCardElevated
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(StudioYellow.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Piano, contentDescription = null, tint = StudioYellow, modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("MIDI Track", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = StudioYellow)
+                                Text("Play & record with USB MIDI Keyboard or Touch Keys Synth", fontSize = 11.sp, color = StudioTextMuted)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showAddTrackTypeDialog = false }) {
+                    Text("Cancel", color = StudioTextSecondary)
+                }
+            },
+            containerColor = StudioSurface,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // Piano Roll & Virtual Keyboard Modal for MIDI Track
+    pianoRollTrackTarget?.let { trackTarget ->
+        val latestTrack = session.tracks.firstOrNull { it.id == trackTarget.id } ?: trackTarget
+        PianoRollModal(
+            track = latestTrack,
+            connectedMidiDevices = connectedMidiDevices,
+            isRecording = isRecording,
+            currentTimeMs = currentTimeMs,
+            onAddNote = { note ->
+                viewModel.addMidiNoteToTrack(latestTrack.id, note)
+            },
+            onRemoveNote = { noteId ->
+                viewModel.removeMidiNoteFromTrack(latestTrack.id, noteId)
+            },
+            onClearNotes = {
+                viewModel.clearMidiNotes(latestTrack.id)
+            },
+            onChangeInstrument = { inst ->
+                viewModel.changeTrackInstrument(latestTrack.id, inst)
+            },
+            onDismiss = { pianoRollTrackTarget = null }
         )
     }
 

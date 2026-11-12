@@ -68,4 +68,30 @@ class WavHelperTest {
         val latency128 = AsioBufferSize.BUFFER_128.latencyMs(48000)
         assertTrue(latency128 in 2.6f..2.7f)
     }
+
+    @Test
+    fun testMidiNoteFrequencyAndRendering() {
+        // A4 (note 69) should be 440 Hz
+        val a4Freq = com.example.audio.MidiSynthEngine.noteToFreq(69)
+        assertEquals(440.0, a4Freq, 0.01)
+
+        // Middle C (note 60) should be ~261.63 Hz
+        val c4Freq = com.example.audio.MidiSynthEngine.noteToFreq(60)
+        assertEquals(261.63, c4Freq, 0.1)
+
+        val midiNotes = listOf(
+            com.example.model.MidiNote(noteNumber = 60, startMs = 0L, durationMs = 500L),
+            com.example.model.MidiNote(noteNumber = 64, startMs = 500L, durationMs = 500L)
+        )
+        val renderedFile = tempFolder.newFile("test_midi_render.wav")
+        val success = com.example.audio.MidiSynthEngine.renderMidiToWav(
+            midiNotes,
+            com.example.model.SynthInstrument.SYNTH_LEAD,
+            renderedFile,
+            minDurationMs = 2000L
+        )
+        assertTrue(success)
+        assertTrue(renderedFile.exists())
+        assertTrue(renderedFile.length() > 44L)
+    }
 }

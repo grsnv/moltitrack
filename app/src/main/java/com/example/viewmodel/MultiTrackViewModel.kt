@@ -35,6 +35,13 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
     val selectedBufferSize = usbInterfaceManager.selectedBufferSize
     val selectedSampleRate = usbInterfaceManager.selectedSampleRate
 
+    private val midiManager = com.example.audio.AndroidMidiManager(application) { noteNumber, velocity, isNoteOn ->
+        if (isNoteOn) {
+            handleExternalMidiNote(noteNumber, velocity)
+        }
+    }
+    val connectedMidiDevices = midiManager.connectedMidiDevices
+
     private val recorderEngine = MultiTrackRecorderEngine(application, viewModelScope)
     private val playerEngine = MultiTrackPlayerEngine(viewModelScope)
 
@@ -208,6 +215,108 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         _userMessage.value = "Added ${newTrack.name}"
     }
 
+    fun addMidiTrack() {
+        val currentTracks = _currentSession.value.tracks
+        val nextIndex = currentTracks.size
+        val color = TrackColors[nextIndex % TrackColors.size]
+        val sessionDir = File(getApplication<Application>().filesDir, "sessions/${_currentSession.value.id}").apply { mkdirs() }
+        val midiFile = File(sessionDir, "midi_${System.currentTimeMillis()}.wav")
+
+        val newTrack = TrackModel(
+            id = UUID.randomUUID().toString(),
+            name = "MIDI Track ${nextIndex + 1}",
+            type = com.example.model.TrackType.MIDI,
+            colorHex = color.value.toLong(),
+            inputDeviceId = "usb_midi",
+            instrument = com.example.model.SynthInstrument.SYNTH_LEAD,
+            isArmed = true,
+            audioFilePath = midiFile.absolutePath
+        )
+        // Render initial silent WAV
+        com.example.audio.MidiSynthEngine.renderMidiToWav(emptyList(), newTrack.instrument, midiFile)
+
+        _currentSession.value = _currentSession.value.copy(
+            tracks = currentTracks + newTrack
+        )
+        _userMessage.value = "Added MIDI Track: ${newTrack.name}. Tap Keys / Piano Roll to compose!"
+    }
+
+    fun addMidiNoteToTrack(trackId: String, note: com.example.model.MidiNote) {
+        val currentTracks = _currentSession.value.tracks
+        val target = currentTracks.firstOrNull { it.id == trackId } ?: return
+        val newNotes = target.midiNotes + note
+
+        renderMidiTrackInternal(target, newNotes)
+    }
+
+    fun removeMidiNoteFromTrack(trackId: String, noteId: String) {
+        val currentTracks = _currentSession.value.tracks
+        val target = currentTracks.firstOrNull { it.id == trackId } ?: return
+        val newNotes = target.midiNotes.filter { it.id != noteId }
+
+        renderMidiTrackInternal(target, newNotes)
+    }
+
+    fun clearMidiNotes(trackId: String) {
+        val currentTracks = _currentSession.value.tracks
+        val target = currentTracks.firstOrNull { it.id == trackId } ?: return
+
+        renderMidiTrackInternal(target, emptyList())
+    }
+
+    fun changeTrackInstrument(trackId: String, instrument: com.example.model.SynthInstrument) {
+        val currentTracks = _currentSession.value.tracks
+        val target = currentTracks.firstOrNull { it.id == trackId } ?: return
+
+        _currentSession.value = _currentSession.value.copy(
+            tracks = currentTracks.map { if (it.id == trackId) it.copy(instrument = instrument) else it }
+        )
+        renderMidiTrackInternal(target.copy(instrument = instrument), target.midiNotes)
+    }
+
+    private fun renderMidiTrackInternal(track: TrackModel, notes: List<com.example.model.MidiNote>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val sessionDir = File(getApplication<Application>().filesDir, "sessions/${_currentSession.value.id}").apply { mkdirs() }
+            val file = track.audioFilePath?.let { File(it) } ?: File(sessionDir, "midi_${track.id}.wav")
+
+            com.example.audio.MidiSynthEngine.renderMidiToWav(notes, track.instrument, file)
+            val waveform = WavHelper.extractWaveform(file)
+            val duration = (max(0L, file.length() - 44) * 1000L) / (44100 * 2)
+
+            _currentSession.value = _currentSession.value.copy(
+                tracks = _currentSession.value.tracks.map {
+                    if (it.id == track.id) {
+                        it.copy(
+                            audioFilePath = file.absolutePath,
+                            midiNotes = notes,
+                            waveformPoints = waveform,
+                            durationMs = duration
+                        )
+                    } else it
+                }
+            )
+        }
+    }
+
+    private fun handleExternalMidiNote(noteNumber: Int, velocity: Int) {
+        val armedMidiTracks = _currentSession.value.tracks.filter { it.type == com.example.model.TrackType.MIDI && it.isArmed }
+        if (armedMidiTracks.isEmpty()) return
+
+        for (track in armedMidiTracks) {
+            com.example.audio.MidiSynthEngine.playNoteLive(noteNumber, track.instrument, viewModelScope)
+            if (isRecording.value) {
+                val newNote = com.example.model.MidiNote(
+                    id = UUID.randomUUID().toString(),
+                    noteNumber = noteNumber,
+                    startMs = recordDurationMs.value,
+                    durationMs = 400L,
+                    velocity = velocity
+                )
+                addMidiNoteToTrack(track.id, newNote)
+            }
+        }
+    }
+
     fun deleteTrack(trackId: String) {
         val currentTracks = _currentSession.value.tracks
         if (currentTracks.size <= 1) {
@@ -339,13 +448,34 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 waveformPoints = WavHelper.extractWaveform(track2File),
                 durationMs = 10000L
             )
+            // Demo MIDI Melodic Notes (C major 7 arpeggio riff)
+            val demoMidiNotes = listOf(
+                com.example.model.MidiNote(noteNumber = 60, startMs = 0L, durationMs = 450L),   // C4
+                com.example.model.MidiNote(noteNumber = 64, startMs = 500L, durationMs = 450L), // E4
+                com.example.model.MidiNote(noteNumber = 67, startMs = 1000L, durationMs = 450L), // G4
+                com.example.model.MidiNote(noteNumber = 71, startMs = 1500L, durationMs = 450L), // B4
+                com.example.model.MidiNote(noteNumber = 72, startMs = 2000L, durationMs = 800L), // C5
+                com.example.model.MidiNote(noteNumber = 69, startMs = 3000L, durationMs = 450L), // A4
+                com.example.model.MidiNote(noteNumber = 67, startMs = 3500L, durationMs = 450L), // G4
+                com.example.model.MidiNote(noteNumber = 65, startMs = 4000L, durationMs = 450L), // F4
+                com.example.model.MidiNote(noteNumber = 64, startMs = 4500L, durationMs = 900L)  // E4
+            )
+            com.example.audio.MidiSynthEngine.renderMidiToWav(
+                demoMidiNotes,
+                com.example.model.SynthInstrument.SYNTH_LEAD,
+                track3File,
+                minDurationMs = 10000L
+            )
+
             val t3 = TrackModel(
                 id = UUID.randomUUID().toString(),
-                name = "Track 3 - Lead Synth",
+                name = "Track 3 - Synth Lead (MIDI)",
+                type = com.example.model.TrackType.MIDI,
                 colorHex = TrackColors[2].value.toLong(),
-                inputDeviceId = "default_mic",
-                inputChannelMode = InputChannelMode.STEREO,
-                volume = 0.85f,
+                inputDeviceId = "usb_midi",
+                instrument = com.example.model.SynthInstrument.SYNTH_LEAD,
+                midiNotes = demoMidiNotes,
+                volume = 0.9f,
                 pan = 0.0f,
                 audioFilePath = track3File.absolutePath,
                 waveformPoints = WavHelper.extractWaveform(track3File),
@@ -358,7 +488,7 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 tracks = listOf(t1, t2, t3),
                 durationMs = 10000L
             )
-            _userMessage.value = "Loaded 3-Track Demo Session. Press Play to listen!"
+            _userMessage.value = "Loaded Demo Session! Track 3 is a MIDI Track — tap Keys to edit notes or play!"
         }
     }
 
@@ -407,6 +537,7 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         super.onCleared()
         inputManager.release()
         usbInterfaceManager.release()
+        midiManager.release()
         playerEngine.stop()
         recorderEngine.stopRecording()
     }
