@@ -1,0 +1,6 @@
+{
+  "name": "MultiTrack",
+  "description": "Multi-input audio recording studio for capturing separate synchronized audio tracks from multiple input devices or channels.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
