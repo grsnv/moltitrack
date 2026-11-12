@@ -3,6 +3,7 @@ package com.example.audio
 import android.content.Context
 import android.media.midi.MidiDevice
 import android.media.midi.MidiDeviceInfo
+import android.media.midi.MidiInputPort
 import android.media.midi.MidiManager
 import android.media.midi.MidiOutputPort
 import android.media.midi.MidiReceiver
@@ -33,6 +34,7 @@ class AndroidMidiManager(
 
     private val openDevices = mutableListOf<MidiDevice>()
     private val openOutputPorts = mutableListOf<MidiOutputPort>()
+    private val openInputPorts = mutableListOf<MidiInputPort>()
 
     private val midiCallback = object : MidiManager.DeviceCallback() {
         override fun onDeviceAdded(device: MidiDeviceInfo?) {
@@ -73,30 +75,43 @@ class AndroidMidiManager(
                 )
 
                 // Open device output port to listen to Note On / Note Off
-                if (info.outputPortCount > 0) {
+                // and open input port to send Program Change, Bank Select, and Notes to the hardware synth!
+                if (info.outputPortCount > 0 || info.inputPortCount > 0) {
                     manager.openDevice(info, { device ->
                         if (device != null) {
                             openDevices.add(device)
-                            val port = device.openOutputPort(0)
-                            if (port != null) {
-                                openOutputPorts.add(port)
-                                port.connect(object : MidiReceiver() {
-                                    override fun onSend(msg: ByteArray?, offset: Int, count: Int, timestamp: Long) {
-                                        if (msg == null || count < 3) return
-                                        val status = msg[offset].toInt() and 0xFF
-                                        val note = msg[offset + 1].toInt() and 0xFF
-                                        val velocity = msg[offset + 2].toInt() and 0xFF
 
-                                        val command = status and 0xF0
-                                        if (command == 0x90 && velocity > 0) {
-                                            // Note On
-                                            onMidiNoteReceived(note, velocity, true)
-                                        } else if (command == 0x80 || (command == 0x90 && velocity == 0)) {
-                                            // Note Off
-                                            onMidiNoteReceived(note, velocity, false)
+                            if (info.outputPortCount > 0) {
+                                val outPort = device.openOutputPort(0)
+                                if (outPort != null) {
+                                    openOutputPorts.add(outPort)
+                                    outPort.connect(object : MidiReceiver() {
+                                        override fun onSend(msg: ByteArray?, offset: Int, count: Int, timestamp: Long) {
+                                            if (msg == null || count < 3) return
+                                            val status = msg[offset].toInt() and 0xFF
+                                            val note = msg[offset + 1].toInt() and 0xFF
+                                            val velocity = msg[offset + 2].toInt() and 0xFF
+
+                                            val command = status and 0xF0
+                                            if (command == 0x90 && velocity > 0) {
+                                                // Note On
+                                                onMidiNoteReceived(note, velocity, true)
+                                            } else if (command == 0x80 || (command == 0x90 && velocity == 0)) {
+                                                // Note Off
+                                                onMidiNoteReceived(note, velocity, false)
+                                            }
                                         }
+                                    })
+                                }
+                            }
+
+                            if (info.inputPortCount > 0) {
+                                val inPort = device.openInputPort(0)
+                                if (inPort != null) {
+                                    synchronized(openInputPorts) {
+                                        openInputPorts.add(inPort)
                                     }
-                                })
+                                }
                             }
                         }
                     }, Handler(Looper.getMainLooper()))
@@ -109,12 +124,83 @@ class AndroidMidiManager(
         _connectedMidiDevices.value = list
     }
 
+    /**
+     * Sends Bank Select MSB (CC 0), Bank Select LSB (CC 32), and Program Change (0xC0)
+     * to switch the active patch in the connected hardware synthesizer!
+     */
+    fun sendProgramChange(channel: Int, program: Int, bankMsb: Int = 0, bankLsb: Int = 0) {
+        val chan = (channel - 1).coerceIn(0, 15)
+        val msbMsg = byteArrayOf((0xB0 or chan).toByte(), 0x00.toByte(), (bankMsb and 0x7F).toByte())
+        val lsbMsg = byteArrayOf((0xB0 or chan).toByte(), 0x20.toByte(), (bankLsb and 0x7F).toByte())
+        val pcMsg = byteArrayOf((0xC0 or chan).toByte(), (program and 0x7F).toByte())
+
+        synchronized(openInputPorts) {
+            for (port in openInputPorts) {
+                try {
+                    port.send(msbMsg, 0, msbMsg.size)
+                    port.send(lsbMsg, 0, lsbMsg.size)
+                    port.send(pcMsg, 0, pcMsg.size)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    /**
+     * Sends MIDI Note On to connected hardware synthesizer.
+     */
+    fun sendNoteOn(channel: Int, note: Int, velocity: Int = 100) {
+        val chan = (channel - 1).coerceIn(0, 15)
+        val msg = byteArrayOf(
+            (0x90 or chan).toByte(),
+            (note and 0x7F).toByte(),
+            (velocity.coerceIn(1, 127)).toByte()
+        )
+        synchronized(openInputPorts) {
+            for (port in openInputPorts) {
+                try {
+                    port.send(msg, 0, msg.size)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    /**
+     * Sends MIDI Note Off to connected hardware synthesizer.
+     */
+    fun sendNoteOff(channel: Int, note: Int) {
+        val chan = (channel - 1).coerceIn(0, 15)
+        val msg = byteArrayOf(
+            (0x80 or chan).toByte(),
+            (note and 0x7F).toByte(),
+            0x00.toByte()
+        )
+        synchronized(openInputPorts) {
+            for (port in openInputPorts) {
+                try {
+                    port.send(msg, 0, msg.size)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
     fun release() {
         try {
             midiManager?.unregisterDeviceCallback(midiCallback)
         } catch (_: Exception) {}
         for (port in openOutputPorts) {
             try { port.close() } catch (_: Exception) {}
+        }
+        synchronized(openInputPorts) {
+            for (port in openInputPorts) {
+                try { port.close() } catch (_: Exception) {}
+            }
+            openInputPorts.clear()
         }
         for (dev in openDevices) {
             try { dev.close() } catch (_: Exception) {}

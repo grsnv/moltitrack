@@ -77,9 +77,14 @@ data class TrackModel(
     val durationMs: Long = 0L,
     val liveMeterLevel: Float = 0.0f, // 0f to 1f for reactive VU meters
     val midiNotes: List<MidiNote> = emptyList(),
-    val instrument: SynthInstrument = SynthInstrument.SYNTH_LEAD
+    val instrument: SynthInstrument = SynthInstrument.SYNTH_LEAD,
+    val midiProgram: Int = 0, // 0 to 127 (General MIDI & Hardware Program Change)
+    val midiBankMsb: Int = 0, // 0 to 127 (Bank Select CC 0)
+    val midiBankLsb: Int = 0, // 0 to 127 (Bank Select CC 32)
+    val midiChannel: Int = 1 // 1 to 16
 ) {
     val color: Color get() = Color(colorHex.toULong())
+    val patchInfo: MidiPatchInfo get() = GeneralMidiPatches.findPatch(midiProgram)
 }
 
 data class RecordingSession(

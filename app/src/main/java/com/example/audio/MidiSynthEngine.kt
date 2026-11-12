@@ -39,8 +39,12 @@ object MidiSynthEngine {
         instrument: SynthInstrument,
         outputFile: File,
         sampleRate: Int = SAMPLE_RATE,
-        minDurationMs: Long = 4000L
+        minDurationMs: Long = 4000L,
+        midiProgram: Int = 0
     ): Boolean {
+        val effectiveInstrument = if (midiProgram > 0) {
+            com.example.model.GeneralMidiPatches.findPatch(midiProgram).synthFamily
+        } else instrument
         if (notes.isEmpty()) {
             // Render a short silent track with minimum duration
             val totalSamples = (minDurationMs * sampleRate / 1000L).toInt()
@@ -75,7 +79,7 @@ object MidiSynthEngine {
                     t < 0.02 -> (t / 0.02) // 20ms attack
                     t < noteDurationSec -> {
                         // Sustain
-                        when (instrument) {
+                        when (effectiveInstrument) {
                             SynthInstrument.ELECTRIC_PIANO,
                             SynthInstrument.BASS_SYNTH -> exp(-(t - 0.02) * 2.5) // decaying sustain
                             else -> 0.8
@@ -88,7 +92,7 @@ object MidiSynthEngine {
                     }
                 }
 
-                val sampleValue = generateInstrumentWave(instrument, freq, t)
+                val sampleValue = generateInstrumentWave(effectiveInstrument, freq, t)
                 accum[s] += (sampleValue * ampEnvelope * velocityGain * 24000f).toFloat()
             }
         }
@@ -167,8 +171,13 @@ object MidiSynthEngine {
         noteNumber: Int,
         instrument: SynthInstrument,
         scope: CoroutineScope,
-        durationMs: Long = 400L
+        durationMs: Long = 400L,
+        midiProgram: Int = 0
     ) {
+        val effectiveInstrument = if (midiProgram > 0) {
+            com.example.model.GeneralMidiPatches.findPatch(midiProgram).synthFamily
+        } else instrument
+
         scope.launch(Dispatchers.IO) {
             try {
                 val freq = noteToFreq(noteNumber)
@@ -178,7 +187,7 @@ object MidiSynthEngine {
                 for (i in 0 until sampleCount) {
                     val t = i.toDouble() / SAMPLE_RATE
                     val env = (1.0 - (i.toDouble() / sampleCount)).coerceAtLeast(0.0)
-                    val wave = generateInstrumentWave(instrument, freq, t)
+                    val wave = generateInstrumentWave(effectiveInstrument, freq, t)
                     buffer[i] = (wave * env * 22000.0).toInt().coerceIn(-32768, 32767).toShort()
                 }
 

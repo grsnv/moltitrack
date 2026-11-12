@@ -279,7 +279,12 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             val sessionDir = File(getApplication<Application>().filesDir, "sessions/${_currentSession.value.id}").apply { mkdirs() }
             val file = track.audioFilePath?.let { File(it) } ?: File(sessionDir, "midi_${track.id}.wav")
 
-            com.example.audio.MidiSynthEngine.renderMidiToWav(notes, track.instrument, file)
+            com.example.audio.MidiSynthEngine.renderMidiToWav(
+                notes = notes,
+                instrument = track.instrument,
+                outputFile = file,
+                midiProgram = track.midiProgram
+            )
             val waveform = WavHelper.extractWaveform(file)
             val duration = (max(0L, file.length() - 44) * 1000L) / (44100 * 2)
 
@@ -298,12 +303,55 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun setTrackMidiPatch(trackId: String, program: Int, bankMsb: Int, bankLsb: Int, channel: Int) {
+        val currentTracks = _currentSession.value.tracks
+        val target = currentTracks.firstOrNull { it.id == trackId } ?: return
+        val patch = com.example.model.GeneralMidiPatches.findPatch(program)
+
+        // Send MIDI Program Change + Bank Select to connected USB hardware
+        midiManager.sendProgramChange(channel, program, bankMsb, bankLsb)
+
+        val updatedTrack = target.copy(
+            midiProgram = program,
+            midiBankMsb = bankMsb,
+            midiBankLsb = bankLsb,
+            midiChannel = channel,
+            instrument = patch.synthFamily
+        )
+
+        _currentSession.value = _currentSession.value.copy(
+            tracks = currentTracks.map { if (it.id == trackId) updatedTrack else it }
+        )
+        renderMidiTrackInternal(updatedTrack, updatedTrack.midiNotes)
+        _userMessage.value = "Selected Patch [${program + 1}]: ${patch.name} (Sent PC #$program to device)"
+    }
+
+    fun auditionMidiNote(track: TrackModel, noteNumber: Int) {
+        midiManager.sendNoteOn(track.midiChannel, noteNumber, 100)
+        com.example.audio.MidiSynthEngine.playNoteLive(
+            noteNumber = noteNumber,
+            instrument = track.instrument,
+            scope = viewModelScope,
+            durationMs = 450L,
+            midiProgram = track.midiProgram
+        )
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(400)
+            midiManager.sendNoteOff(track.midiChannel, noteNumber)
+        }
+    }
+
     private fun handleExternalMidiNote(noteNumber: Int, velocity: Int) {
         val armedMidiTracks = _currentSession.value.tracks.filter { it.type == com.example.model.TrackType.MIDI && it.isArmed }
         if (armedMidiTracks.isEmpty()) return
 
         for (track in armedMidiTracks) {
-            com.example.audio.MidiSynthEngine.playNoteLive(noteNumber, track.instrument, viewModelScope)
+            com.example.audio.MidiSynthEngine.playNoteLive(
+                noteNumber = noteNumber,
+                instrument = track.instrument,
+                scope = viewModelScope,
+                midiProgram = track.midiProgram
+            )
             if (isRecording.value) {
                 val newNote = com.example.model.MidiNote(
                     id = UUID.randomUUID().toString(),
