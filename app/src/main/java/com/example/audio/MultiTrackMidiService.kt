@@ -4,6 +4,7 @@ import android.media.midi.MidiDeviceService
 import android.media.midi.MidiDeviceStatus
 import android.media.midi.MidiReceiver
 import com.example.model.MidiActivityEvent
+import com.example.model.MidiEventType
 import com.example.model.MidiRoutingConstants
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -47,47 +48,79 @@ object VirtualMidiRouter {
     ) {
         val parsed = MidiMessageParser.parse(msg, offset, count)
         for (item in parsed) {
-            val event = when (item) {
-                is ParsedMidiMessage.NoteOn -> MidiActivityEvent(
-                    sourceId = sourceId,
-                    sourceName = sourceName,
-                    channel = item.channel,
-                    noteNumber = item.note,
-                    velocity = item.velocity,
-                    isNoteOn = true
-                )
-                is ParsedMidiMessage.NoteOff -> MidiActivityEvent(
-                    sourceId = sourceId,
-                    sourceName = sourceName,
-                    channel = item.channel,
-                    noteNumber = item.note,
-                    velocity = item.velocity,
-                    isNoteOn = false
-                )
-                is ParsedMidiMessage.ProgramChange -> MidiActivityEvent(
-                    sourceId = sourceId,
-                    sourceName = sourceName,
-                    channel = item.channel,
-                    noteNumber = -1,
-                    velocity = 0,
-                    isNoteOn = false,
-                    programChange = item.program
-                )
-                is ParsedMidiMessage.ControlChange -> null
-            }
-
-            if (event != null) {
-                for (listener in listeners) {
-                    listener(event)
-                }
+            val event = item.toMidiActivityEvent(sourceId = sourceId, sourceName = sourceName)
+            for (listener in listeners) {
+                listener(event)
             }
         }
     }
 }
 
+fun ParsedMidiMessage.toMidiActivityEvent(sourceId: String, sourceName: String): MidiActivityEvent {
+    return when (this) {
+        is ParsedMidiMessage.NoteOn -> MidiActivityEvent(
+            sourceId = sourceId,
+            sourceName = sourceName,
+            channel = channel,
+            type = MidiEventType.NOTE_ON,
+            data1 = note,
+            data2 = velocity
+        )
+        is ParsedMidiMessage.NoteOff -> MidiActivityEvent(
+            sourceId = sourceId,
+            sourceName = sourceName,
+            channel = channel,
+            type = MidiEventType.NOTE_OFF,
+            data1 = note,
+            data2 = velocity
+        )
+        is ParsedMidiMessage.ControlChange -> MidiActivityEvent(
+            sourceId = sourceId,
+            sourceName = sourceName,
+            channel = channel,
+            type = MidiEventType.CONTROL_CHANGE,
+            data1 = controller,
+            data2 = value
+        )
+        is ParsedMidiMessage.ProgramChange -> MidiActivityEvent(
+            sourceId = sourceId,
+            sourceName = sourceName,
+            channel = channel,
+            type = MidiEventType.PROGRAM_CHANGE,
+            data1 = program,
+            data2 = 0
+        )
+        is ParsedMidiMessage.PitchBend -> MidiActivityEvent(
+            sourceId = sourceId,
+            sourceName = sourceName,
+            channel = channel,
+            type = MidiEventType.PITCH_BEND,
+            data1 = value14Bit,
+            data2 = 0
+        )
+        is ParsedMidiMessage.ChannelPressure -> MidiActivityEvent(
+            sourceId = sourceId,
+            sourceName = sourceName,
+            channel = channel,
+            type = MidiEventType.CHANNEL_PRESSURE,
+            data1 = pressure,
+            data2 = 0
+        )
+        is ParsedMidiMessage.PolyPressure -> MidiActivityEvent(
+            sourceId = sourceId,
+            sourceName = sourceName,
+            channel = channel,
+            type = MidiEventType.POLY_PRESSURE,
+            data1 = note,
+            data2 = pressure
+        )
+    }
+}
+
 /**
  * Android MidiDeviceService allowing other MIDI apps (sequencers, controllers, arpeggiators)
- * to discover "MultiTrack Virtual MIDI" and route MIDI channels/notes directly into MultiTrack tracks.
+ * to discover "MultiTrack Virtual MIDI" and route MIDI channels, notes, CCs, pitch bend,
+ * aftertouch, and program changes directly into MultiTrack tracks.
  */
 class MultiTrackMidiService : MidiDeviceService() {
 
@@ -95,7 +128,6 @@ class MultiTrackMidiService : MidiDeviceService() {
         override fun onSend(msg: ByteArray?, offset: Int, count: Int, timestamp: Long) {
             if (msg == null || count <= 0) return
 
-            // Forward raw bytes to our virtual Thru output port if any downstream app is listening
             try {
                 for (outReceiver in outputPortReceivers) {
                     outReceiver?.send(msg, offset, count, timestamp)

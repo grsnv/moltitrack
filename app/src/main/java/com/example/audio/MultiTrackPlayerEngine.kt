@@ -3,7 +3,9 @@ package com.example.audio
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import com.example.model.RecordedMidiEvent
 import com.example.model.TrackModel
+import com.example.model.TrackType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -50,24 +52,36 @@ class MultiTrackPlayerEngine(
     // Target seek offset in bytes from start of audio (after 44-byte header)
     private var pendingSeekBytes: Long? = null
 
-    fun play(tracks: List<TrackModel>, startPositionMs: Long = 0L) {
+    fun play(
+        tracks: List<TrackModel>,
+        startPositionMs: Long = 0L,
+        onMidiEventReplay: ((TrackModel, RecordedMidiEvent) -> Unit)? = null
+    ) {
         if (isPlaying.get()) {
             stop()
         }
 
-        val playableTracks = tracks.filter { it.audioFilePath != null && File(it.audioFilePath).exists() }
-        if (playableTracks.isEmpty()) return
+        val playableAudioTracks = tracks.filter { it.audioFilePath != null && File(it.audioFilePath).exists() }
+        val midiTracksWithEvents = tracks.filter { it.type == TrackType.MIDI && it.midiEvents.isNotEmpty() }
+        if (playableAudioTracks.isEmpty() && midiTracksWithEvents.isEmpty()) return
 
-        // Calculate max duration across tracks
         var maxDur = 0L
-        for (t in playableTracks) {
+        for (t in playableAudioTracks) {
             val f = File(t.audioFilePath!!)
             val audioBytes = max(0L, f.length() - 44)
-            // 44100 samples/sec, 16-bit = 2 bytes per sample (mono) or 4 bytes (stereo)
             val dur = (audioBytes * 1000L) / (sampleRate * 2L)
             if (dur > maxDur) maxDur = dur
         }
+        for (t in midiTracksWithEvents) {
+            val lastMidiMs = t.midiEvents.maxOfOrNull { it.timestampMs + 300L } ?: 0L
+            if (lastMidiMs > maxDur) maxDur = lastMidiMs
+        }
         _totalDurationMs.value = maxDur
+
+        val sortedMidiByTrack: Map<String, List<RecordedMidiEvent>> =
+            midiTracksWithEvents.associate { t -> t.id to t.midiEvents.sortedBy { it.timestampMs } }
+        val midiCursorByTrack = mutableMapOf<String, Int>()
+        resetMidiCursors(sortedMidiByTrack, midiCursorByTrack, startPositionMs)
 
         isPlaying.set(true)
         _isPlayingFlow.value = true
@@ -105,7 +119,7 @@ class MultiTrackPlayerEngine(
                 audioTrack.play()
 
                 val startByte = (startPositionMs * sampleRate * 2L) / 1000L
-                openStreams(playableTracks, fileStreams, startByte)
+                openStreams(playableAudioTracks, fileStreams, startByte)
 
                 var currentByteOffset = startByte
                 val chunkSamples = 1024
@@ -113,24 +127,24 @@ class MultiTrackPlayerEngine(
                 val outStereoBytes = ByteArray(chunkSamples * 4) // stereo 16-bit
 
                 while (isActive && isPlaying.get()) {
-                    // Check seek
                     val targetSeek = pendingSeekBytes
                     if (targetSeek != null) {
                         pendingSeekBytes = null
                         currentByteOffset = targetSeek
-                        openStreams(playableTracks, fileStreams, targetSeek)
+                        val seekMs = (targetSeek * 1000L) / (sampleRate * 2L)
+                        resetMidiCursors(sortedMidiByTrack, midiCursorByTrack, seekMs)
+                        openStreams(playableAudioTracks, fileStreams, targetSeek)
                         audioTrack.flush()
                     }
 
-                    // Check solo condition
-                    val hasSolo = playableTracks.any { it.isSoloed }
+                    val hasSolo = tracks.any { it.isSoloed }
 
                     val accumLeft = FloatArray(chunkSamples)
                     val accumRight = FloatArray(chunkSamples)
                     val currentTrackMeters = mutableMapOf<String, Float>()
                     var anyDataRead = false
 
-                    for (track in playableTracks) {
+                    for (track in playableAudioTracks) {
                         val stream = fileStreams[track.id] ?: continue
                         val isTrackActive = if (hasSolo) track.isSoloed else !track.isMuted
                         val bytesRead = stream.read(inBytes)
@@ -167,17 +181,40 @@ class MultiTrackPlayerEngine(
                         }
                     }
 
+                    val currentTimeMs = (currentByteOffset * 1000L) / (sampleRate * 2L)
+                    val nextByteOffset = currentByteOffset + chunkSamples * 2L
+                    val nextTimeMs = (nextByteOffset * 1000L) / (sampleRate * 2L)
+
+                    // Replay recorded raw MIDI parameter events in sync with playback head
+                    if (onMidiEventReplay != null && sortedMidiByTrack.isNotEmpty()) {
+                        for (track in midiTracksWithEvents) {
+                            val isTrackActive = if (hasSolo) track.isSoloed else !track.isMuted
+                            val events = sortedMidiByTrack[track.id] ?: continue
+                            var idx = midiCursorByTrack[track.id] ?: 0
+                            while (idx < events.size && events[idx].timestampMs < nextTimeMs) {
+                                if (isTrackActive && events[idx].timestampMs >= currentTimeMs - 30L) {
+                                    onMidiEventReplay(track, events[idx])
+                                }
+                                idx++
+                            }
+                            midiCursorByTrack[track.id] = idx
+                            if (idx < events.size) {
+                                anyDataRead = true
+                            }
+                        }
+                    }
+
                     if (!anyDataRead) {
                         if (isLooping) {
                             currentByteOffset = 0L
-                            openStreams(playableTracks, fileStreams, 0L)
+                            resetMidiCursors(sortedMidiByTrack, midiCursorByTrack, 0L)
+                            openStreams(playableAudioTracks, fileStreams, 0L)
                             continue
                         } else {
                             break
                         }
                     }
 
-                    // Write stereo mixed buffer to AudioTrack
                     var outIdx = 0
                     var masterLeftPeak = 0f
                     var masterRightPeak = 0f
@@ -198,8 +235,8 @@ class MultiTrackPlayerEngine(
                     }
 
                     audioTrack.write(outStereoBytes, 0, outIdx)
-                    currentByteOffset += chunkSamples * 2L
-                    _currentPositionMs.value = (currentByteOffset * 1000L) / (sampleRate * 2L)
+                    currentByteOffset = nextByteOffset
+                    _currentPositionMs.value = nextTimeMs
 
                     _masterMeterLevel.value = Pair(
                         (masterLeftPeak / 32768f).coerceIn(0f, 1f),
@@ -222,6 +259,17 @@ class MultiTrackPlayerEngine(
                 _masterMeterLevel.value = Pair(0f, 0f)
                 _trackPlaybackMeters.value = emptyMap()
             }
+        }
+    }
+
+    private fun resetMidiCursors(
+        sortedMidiByTrack: Map<String, List<RecordedMidiEvent>>,
+        cursors: MutableMap<String, Int>,
+        positionMs: Long
+    ) {
+        for ((trackId, events) in sortedMidiByTrack) {
+            val idx = events.indexOfFirst { it.timestampMs >= positionMs }
+            cursors[trackId] = if (idx >= 0) idx else events.size
         }
     }
 

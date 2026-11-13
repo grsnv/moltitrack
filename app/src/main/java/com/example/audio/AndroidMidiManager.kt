@@ -12,6 +12,8 @@ import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.example.model.MidiActivityEvent
+import com.example.model.MidiRoutingConstants
+import com.example.model.RecordedMidiEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -57,6 +59,7 @@ class AndroidMidiManager(
     private val openDevices = ConcurrentHashMap<Int, MidiDevice>()
     private val openOutputPorts = ConcurrentHashMap<Int, MutableList<MidiOutputPort>>()
     private val openInputPorts = ConcurrentHashMap<Int, MutableList<MidiInputPort>>()
+    private val openInputPortsByKey = ConcurrentHashMap<String, MutableList<MidiInputPort>>()
     private val pendingOpenIds = ConcurrentHashMap.newKeySet<Int>()
 
     private val virtualRouterListener: (MidiActivityEvent) -> Unit = { event ->
@@ -174,38 +177,12 @@ class AndroidMidiManager(
                                                 if (msg == null || count <= 0) return
                                                 val parsed = MidiMessageParser.parse(msg, offset, count)
                                                 for (item in parsed) {
-                                                    val event = when (item) {
-                                                        is ParsedMidiMessage.NoteOn -> MidiActivityEvent(
-                                                            sourceId = deviceKey,
-                                                            sourceName = name,
-                                                            channel = item.channel,
-                                                            noteNumber = item.note,
-                                                            velocity = item.velocity,
-                                                            isNoteOn = true
-                                                        )
-                                                        is ParsedMidiMessage.NoteOff -> MidiActivityEvent(
-                                                            sourceId = deviceKey,
-                                                            sourceName = name,
-                                                            channel = item.channel,
-                                                            noteNumber = item.note,
-                                                            velocity = item.velocity,
-                                                            isNoteOn = false
-                                                        )
-                                                        is ParsedMidiMessage.ProgramChange -> MidiActivityEvent(
-                                                            sourceId = deviceKey,
-                                                            sourceName = name,
-                                                            channel = item.channel,
-                                                            noteNumber = -1,
-                                                            velocity = 0,
-                                                            isNoteOn = false,
-                                                            programChange = item.program
-                                                        )
-                                                        is ParsedMidiMessage.ControlChange -> null
-                                                    }
-                                                    if (event != null) {
-                                                        _lastMidiActivity.value = event
-                                                        onMidiEventReceived(event)
-                                                    }
+                                                    val event = item.toMidiActivityEvent(
+                                                        sourceId = deviceKey,
+                                                        sourceName = name
+                                                    )
+                                                    _lastMidiActivity.value = event
+                                                    onMidiEventReceived(event)
                                                 }
                                             }
                                         })
@@ -217,9 +194,16 @@ class AndroidMidiManager(
                             }
 
                             if (info.inputPortCount > 0) {
-                                val inPort = device.openInputPort(0)
-                                if (inPort != null) {
-                                    openInputPorts[info.id] = mutableListOf(inPort)
+                                val inList = mutableListOf<MidiInputPort>()
+                                for (portIdx in 0 until info.inputPortCount) {
+                                    val inPort = device.openInputPort(portIdx)
+                                    if (inPort != null) {
+                                        inList.add(inPort)
+                                    }
+                                }
+                                if (inList.isNotEmpty()) {
+                                    openInputPorts[info.id] = inList
+                                    openInputPortsByKey[deviceKey] = inList
                                 }
                             }
                         }
@@ -235,6 +219,7 @@ class AndroidMidiManager(
 
     private fun closeDeviceById(deviceId: Int) {
         pendingOpenIds.remove(deviceId)
+        openInputPortsByKey.remove("midi_dev_$deviceId")
         openOutputPorts.remove(deviceId)?.forEach { port ->
             try { port.close() } catch (_: Exception) {}
         }
@@ -246,69 +231,60 @@ class AndroidMidiManager(
         }
     }
 
-    /**
-     * Sends Bank Select MSB (CC 0), Bank Select LSB (CC 32), and Program Change (0xC0)
-     * to switch the active patch in the connected hardware/app synthesizer.
-     */
-    fun sendProgramChange(channel: Int, program: Int, bankMsb: Int = 0, bankLsb: Int = 0) {
-        val chan = (channel - 1).coerceIn(0, 15)
-        val msbMsg = byteArrayOf((0xB0 or chan).toByte(), 0x00.toByte(), (bankMsb and 0x7F).toByte())
-        val lsbMsg = byteArrayOf((0xB0 or chan).toByte(), 0x20.toByte(), (bankLsb and 0x7F).toByte())
-        val pcMsg = byteArrayOf((0xC0 or chan).toByte(), (program and 0x7F).toByte())
+    fun sendRawMidiBytes(targetDeviceKey: String, bytes: ByteArray) {
+        if (bytes.isEmpty() || targetDeviceKey == MidiRoutingConstants.NO_MIDI_OUTPUT_ID) return
 
-        for (ports in openInputPorts.values) {
-            for (port in ports) {
-                try {
-                    port.send(msbMsg, 0, msbMsg.size)
-                    port.send(lsbMsg, 0, lsbMsg.size)
-                    port.send(pcMsg, 0, pcMsg.size)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+        val portsToSend: List<MidiInputPort> = when (targetDeviceKey) {
+            MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID, "" -> openInputPorts.values.flatten()
+            else -> openInputPortsByKey[targetDeviceKey].orEmpty()
+        }
+
+        for (port in portsToSend) {
+            try {
+                port.send(bytes, 0, bytes.size)
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
 
-    /**
-     * Sends MIDI Note On to connected hardware/virtual synthesizer input ports.
-     */
-    fun sendNoteOn(channel: Int, note: Int, velocity: Int = 100) {
-        val chan = (channel - 1).coerceIn(0, 15)
+    fun sendRecordedMidiEvent(
+        targetDeviceKey: String,
+        outputChannelOverride: Int,
+        event: RecordedMidiEvent
+    ) {
+        sendRawMidiBytes(targetDeviceKey, event.toMidiBytes(outputChannelOverride))
+    }
+
+    fun sendNoteOn(
+        channel: Int,
+        note: Int,
+        velocity: Int = 100,
+        targetDeviceKey: String = MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID
+    ) {
+        val effectiveCh = if (channel in 1..16) channel else 1
+        val chan = (effectiveCh - 1).coerceIn(0, 15)
         val msg = byteArrayOf(
             (0x90 or chan).toByte(),
             (note and 0x7F).toByte(),
             (velocity.coerceIn(1, 127)).toByte()
         )
-        for (ports in openInputPorts.values) {
-            for (port in ports) {
-                try {
-                    port.send(msg, 0, msg.size)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
+        sendRawMidiBytes(targetDeviceKey, msg)
     }
 
-    /**
-     * Sends MIDI Note Off to connected hardware/virtual synthesizer input ports.
-     */
-    fun sendNoteOff(channel: Int, note: Int) {
-        val chan = (channel - 1).coerceIn(0, 15)
+    fun sendNoteOff(
+        channel: Int,
+        note: Int,
+        targetDeviceKey: String = MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID
+    ) {
+        val effectiveCh = if (channel in 1..16) channel else 1
+        val chan = (effectiveCh - 1).coerceIn(0, 15)
         val msg = byteArrayOf(
             (0x80 or chan).toByte(),
             (note and 0x7F).toByte(),
             0x00.toByte()
         )
-        for (ports in openInputPorts.values) {
-            for (port in ports) {
-                try {
-                    port.send(msg, 0, msg.size)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
+        sendRawMidiBytes(targetDeviceKey, msg)
     }
 
     fun release() {

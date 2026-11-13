@@ -85,9 +85,8 @@ class WavHelperTest {
         )
         val renderedFile = tempFolder.newFile("test_midi_render.wav")
         val success = com.example.audio.MidiSynthEngine.renderMidiToWav(
-            midiNotes,
-            com.example.model.SynthInstrument.SYNTH_LEAD,
-            renderedFile,
+            notes = midiNotes,
+            outputFile = renderedFile,
             minDurationMs = 2000L
         )
         assertTrue(success)

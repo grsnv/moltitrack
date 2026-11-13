@@ -2,7 +2,9 @@ package com.example.model
 
 import android.media.AudioDeviceInfo
 import androidx.compose.ui.graphics.Color
+import com.example.audio.MidiCcNames
 import com.example.ui.theme.TrackColors
+import java.util.UUID
 
 enum class AudioInputType {
     BUILTIN_MIC,
@@ -36,47 +38,133 @@ enum class TrackType {
     MIDI
 }
 
-enum class SynthInstrument(val displayName: String, val category: String) {
-    SYNTH_LEAD("Neon Saw Lead", "Lead"),
-    ELECTRIC_PIANO("FM Electric Piano", "Keys"),
-    BASS_SYNTH("Analog Sub Bass", "Bass"),
-    PAD_STRINGS("Lush Warm Pad", "Pad"),
-    RETRO_8BIT("Chiptune Square", "Retro")
+enum class MidiEventType(val shortLabel: String) {
+    NOTE_ON("NOTE ON"),
+    NOTE_OFF("NOTE OFF"),
+    CONTROL_CHANGE("CC"),
+    PROGRAM_CHANGE("PC"),
+    PITCH_BEND("BEND"),
+    CHANNEL_PRESSURE("AT"),
+    POLY_PRESSURE("POLY AT")
 }
 
 data class MidiNote(
-    val id: String = java.util.UUID.randomUUID().toString(),
+    val id: String = UUID.randomUUID().toString(),
     val noteNumber: Int = 60, // 60 = Middle C (C4)
     val startMs: Long = 0L,
     val durationMs: Long = 500L,
-    val velocity: Int = 100 // 1..127
+    val velocity: Int = 100, // 1..127
+    val channel: Int = 1 // 1..16
 ) {
     val noteName: String
         get() {
             val names = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
             val octave = (noteNumber / 12) - 1
-            val name = names[noteNumber % 12]
+            val name = names[noteNumber.coerceIn(0, 127) % 12]
             return "$name$octave"
         }
+}
+
+data class RecordedMidiEvent(
+    val id: String = UUID.randomUUID().toString(),
+    val timestampMs: Long,
+    val channel: Int, // 1..16
+    val type: MidiEventType,
+    val data1: Int, // Note #, CC #, Program #, Pressure, or 14-bit Pitch Bend (0..16383)
+    val data2: Int = 0 // Velocity, CC value, or Poly Pressure value
+) {
+    fun describe(): String = when (type) {
+        MidiEventType.NOTE_ON -> "Note On #${data1} (vel $data2)"
+        MidiEventType.NOTE_OFF -> "Note Off #${data1} (vel $data2)"
+        MidiEventType.CONTROL_CHANGE -> "${MidiCcNames.labelFor(data1)} (CC $data1) = $data2"
+        MidiEventType.PROGRAM_CHANGE -> "Program #$data1"
+        MidiEventType.PITCH_BEND -> "Pitch Bend ${data1 - 8192}"
+        MidiEventType.CHANNEL_PRESSURE -> "Aftertouch $data1"
+        MidiEventType.POLY_PRESSURE -> "Poly AT #$data1 = $data2"
+    }
+
+    fun toMidiBytes(channelOverride: Int = 0): ByteArray {
+        val effectiveCh = if (channelOverride in 1..16) channelOverride else channel
+        val chNibble = (effectiveCh - 1).coerceIn(0, 15)
+        return when (type) {
+            MidiEventType.NOTE_ON -> byteArrayOf(
+                (0x90 or chNibble).toByte(),
+                (data1 and 0x7F).toByte(),
+                data2.coerceIn(1, 127).toByte()
+            )
+            MidiEventType.NOTE_OFF -> byteArrayOf(
+                (0x80 or chNibble).toByte(),
+                (data1 and 0x7F).toByte(),
+                (data2 and 0x7F).toByte()
+            )
+            MidiEventType.CONTROL_CHANGE -> byteArrayOf(
+                (0xB0 or chNibble).toByte(),
+                (data1 and 0x7F).toByte(),
+                (data2 and 0x7F).toByte()
+            )
+            MidiEventType.PROGRAM_CHANGE -> byteArrayOf(
+                (0xC0 or chNibble).toByte(),
+                (data1 and 0x7F).toByte()
+            )
+            MidiEventType.PITCH_BEND -> {
+                val clamped = data1.coerceIn(0, 16383)
+                val lsb = clamped and 0x7F
+                val msb = (clamped shr 7) and 0x7F
+                byteArrayOf(
+                    (0xE0 or chNibble).toByte(),
+                    lsb.toByte(),
+                    msb.toByte()
+                )
+            }
+            MidiEventType.CHANNEL_PRESSURE -> byteArrayOf(
+                (0xD0 or chNibble).toByte(),
+                (data1 and 0x7F).toByte()
+            )
+            MidiEventType.POLY_PRESSURE -> byteArrayOf(
+                (0xA0 or chNibble).toByte(),
+                (data1 and 0x7F).toByte(),
+                (data2 and 0x7F).toByte()
+            )
+        }
+    }
 }
 
 object MidiRoutingConstants {
     const val ALL_MIDI_INPUTS_ID = "all_midi"
     const val VIRTUAL_APP_MIDI_ID = "virtual_app_midi"
     const val LEGACY_USB_MIDI_ID = "usb_midi"
-    const val CHANNEL_OMNI = 0 // 0 = All MIDI Channels (1..16)
+    const val ALL_MIDI_OUTPUTS_ID = "all_midi_out"
+    const val NO_MIDI_OUTPUT_ID = "none_midi_out"
+    const val CHANNEL_OMNI = 0 // 0 = All / Preserve Original MIDI Channels (1..16)
 }
 
 data class MidiActivityEvent(
     val sourceId: String,
     val sourceName: String,
     val channel: Int, // 1..16
-    val noteNumber: Int, // 0..127, or -1 if Program Change
-    val velocity: Int,
-    val isNoteOn: Boolean,
-    val programChange: Int? = null,
+    val type: MidiEventType,
+    val data1: Int,
+    val data2: Int = 0,
     val timestamp: Long = System.currentTimeMillis()
-)
+) {
+    fun summaryText(): String = when (type) {
+        MidiEventType.NOTE_ON -> "Note On #$data1 (vel $data2)"
+        MidiEventType.NOTE_OFF -> "Note Off #$data1"
+        MidiEventType.CONTROL_CHANGE -> "${MidiCcNames.labelFor(data1)} = $data2"
+        MidiEventType.PROGRAM_CHANGE -> "Program #$data1"
+        MidiEventType.PITCH_BEND -> "Pitch Bend ${data1 - 8192}"
+        MidiEventType.CHANNEL_PRESSURE -> "Aftertouch $data1"
+        MidiEventType.POLY_PRESSURE -> "Poly AT #$data1 = $data2"
+    }
+
+    fun toRecordedEvent(timestampMs: Long): RecordedMidiEvent = RecordedMidiEvent(
+        timestampMs = timestampMs,
+        channel = channel,
+        type = type,
+        data1 = data1,
+        data2 = data2
+    )
+}
 
 data class TrackModel(
     val id: String,
@@ -95,18 +183,22 @@ data class TrackModel(
     val durationMs: Long = 0L,
     val liveMeterLevel: Float = 0.0f, // 0f to 1f for reactive VU meters
     val midiNotes: List<MidiNote> = emptyList(),
-    val instrument: SynthInstrument = SynthInstrument.SYNTH_LEAD,
-    val midiProgram: Int = 0, // 0 to 127 (General MIDI & Hardware Program Change)
-    val midiBankMsb: Int = 0, // 0 to 127 (Bank Select CC 0)
-    val midiBankLsb: Int = 0, // 0 to 127 (Bank Select CC 32)
-    val midiChannel: Int = 1, // 1 to 16 (MIDI Output Channel)
-    val midiInputChannel: Int = MidiRoutingConstants.CHANNEL_OMNI // 0 = Omni (All), 1..16 = specific input channel
+    val midiEvents: List<RecordedMidiEvent> = emptyList(),
+    val midiInputChannel: Int = MidiRoutingConstants.CHANNEL_OMNI, // 0 = Omni (All), 1..16 = specific input channel
+    val midiOutputDeviceId: String = MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID,
+    val midiChannel: Int = MidiRoutingConstants.CHANNEL_OMNI, // 0 = Preserve Input Ch, 1..16 = Force Output Ch
+    val latestCcValues: Map<Int, Int> = emptyMap(),
+    val latestProgram: Int? = null,
+    val latestPitchBend: Int = 8192,
+    val latestAftertouch: Int = 0
 ) {
     val color: Color get() = Color(colorHex.toULong())
-    val patchInfo: MidiPatchInfo get() = GeneralMidiPatches.findPatch(midiProgram)
 
     val midiInputChannelLabel: String
         get() = if (midiInputChannel == MidiRoutingConstants.CHANNEL_OMNI) "Omni (All)" else "Ch $midiInputChannel"
+
+    val midiOutputChannelLabel: String
+        get() = if (midiChannel == MidiRoutingConstants.CHANNEL_OMNI) "Orig Ch" else "Ch $midiChannel"
 
     fun matchesMidiInput(sourceId: String, channel: Int): Boolean {
         if (type != TrackType.MIDI || !isArmed) return false

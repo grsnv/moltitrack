@@ -97,7 +97,6 @@ fun TrackLaneCard(
     onOpenRouting: () -> Unit,
     onOpenPianoRoll: () -> Unit = {},
     onOpenMidiRouting: () -> Unit = {},
-    onOpenPatchSelector: () -> Unit = {},
     onRename: (String) -> Unit,
     onClearAudio: () -> Unit,
     onDeleteTrack: () -> Unit,
@@ -168,31 +167,38 @@ fun TrackLaneCard(
                         )
                     }
 
-                    // Input Device & Channel routing tag OR MIDI synth + input routing tags
+                    // Input Device & Channel routing tag OR Raw MIDI parameters + routing tags
                     if (track.type == com.example.model.TrackType.MIDI) {
                         Column(
                             modifier = Modifier.padding(top = 2.dp),
                             verticalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
+                            val paramParts = buildList {
+                                add("${track.midiNotes.size}n")
+                                add("${track.midiEvents.size} evts")
+                                if (track.latestCcValues.isNotEmpty()) add("${track.latestCcValues.size} CC")
+                                if (track.latestProgram != null) add("PC#${track.latestProgram}")
+                                if (track.latestPitchBend != 8192) add("PB")
+                            }
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
                                     .background(StudioYellow.copy(alpha = 0.15f))
                                     .border(1.dp, StudioYellow.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
-                                    .clickable { onOpenPatchSelector() }
+                                    .clickable { onOpenPianoRoll() }
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                                     .testTag("midi_chip_${track.id}")
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Piano,
-                                    contentDescription = "Synth Patch",
+                                    contentDescription = "MIDI Notes and Parameters",
                                     tint = StudioYellow,
                                     modifier = Modifier.size(11.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "#${track.midiProgram + 1} ${track.patchInfo.name} (${track.midiNotes.size}n)",
+                                    text = "MIDI • ${paramParts.joinToString(" • ")}",
                                     color = StudioYellow,
                                     fontSize = 10.sp,
                                     fontFamily = FontFamily.Monospace,
@@ -209,7 +215,7 @@ fun TrackLaneCard(
                                 "default_mic" -> "All MIDI"
                                 else -> connectedMidiDevices.firstOrNull { it.deviceKey == track.inputDeviceId }?.name ?: "MIDI Port"
                             }
-                            val chLabel = if (track.midiInputChannel == 0) "Omni Ch" else "Ch ${track.midiInputChannel}"
+                            val chLabel = if (track.midiInputChannel == 0) "Omni" else "Ch ${track.midiInputChannel}"
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
@@ -221,13 +227,13 @@ fun TrackLaneCard(
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.SwapHoriz,
-                                    contentDescription = "MIDI Input Routing",
+                                    contentDescription = "MIDI Input & Output Routing",
                                     tint = StudioCyan,
                                     modifier = Modifier.size(11.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "In: $sourceLabel • $chLabel",
+                                    text = "In: $sourceLabel ($chLabel) • Out: ${track.midiOutputChannelLabel}",
                                     color = StudioCyan,
                                     fontSize = 10.sp,
                                     fontFamily = FontFamily.Monospace,
@@ -392,7 +398,7 @@ fun TrackLaneCard(
                     ) {
                         if (track.type == com.example.model.TrackType.MIDI) {
                             DropdownMenuItem(
-                                text = { Text("MIDI Input & App Routing") },
+                                text = { Text("MIDI Input / Output Routing") },
                                 leadingIcon = { Icon(Icons.Default.SwapHoriz, null) },
                                 onClick = {
                                     showMenu = false
@@ -400,11 +406,11 @@ fun TrackLaneCard(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Synth Sound & All Patches") },
+                                text = { Text("Notes & MIDI Parameters") },
                                 leadingIcon = { Icon(Icons.Default.Tune, null) },
                                 onClick = {
                                     showMenu = false
-                                    onOpenPatchSelector()
+                                    onOpenPianoRoll()
                                 }
                             )
                         } else {

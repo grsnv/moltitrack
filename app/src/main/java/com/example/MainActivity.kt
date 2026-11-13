@@ -83,7 +83,6 @@ import com.example.model.TrackModel
 import com.example.ui.components.ExportDialog
 import com.example.ui.components.InputRoutingDialog
 import com.example.ui.components.MasterTransportBar
-import com.example.ui.components.MidiPatchSelectorDialog
 import com.example.ui.components.MidiRoutingDialog
 import com.example.ui.components.PianoRollModal
 import com.example.ui.components.TrackLaneCard
@@ -160,7 +159,6 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
     // Dialog States
     var routingTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
     var midiRoutingTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
-    var patchSelectorTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
     var pianoRollTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
     var showAddTrackTypeDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
@@ -181,7 +179,10 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                 masterMeterLeft = masterMeterLevel.first,
                 masterMeterRight = masterMeterLevel.second,
                 onRecordToggle = {
-                    if (!hasRecordPermission) {
+                    val needsMic = session.tracks.any {
+                        it.isArmed && it.type == com.example.model.TrackType.AUDIO
+                    }
+                    if (needsMic && !hasRecordPermission) {
                         permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     } else {
                         if (isRecording) viewModel.stopRecording() else viewModel.startRecording()
@@ -497,7 +498,6 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                         onOpenRouting = { routingTrackTarget = track },
                         onOpenPianoRoll = { pianoRollTrackTarget = track },
                         onOpenMidiRouting = { midiRoutingTrackTarget = track },
-                        onOpenPatchSelector = { patchSelectorTrackTarget = track },
                         onRename = { newName -> viewModel.renameTrack(track.id, newName) },
                         onClearAudio = { viewModel.clearTrackAudio(track.id) },
                         onDeleteTrack = { viewModel.deleteTrack(track.id) }
@@ -651,7 +651,7 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
         )
     }
 
-    // Piano Roll & Virtual Keyboard Modal for MIDI Track
+    // Piano Roll & MIDI Parameters Modal for MIDI Track
     pianoRollTrackTarget?.let { trackTarget ->
         val latestTrack = session.tracks.firstOrNull { it.id == trackTarget.id } ?: trackTarget
         PianoRollModal(
@@ -671,9 +671,6 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
             onAuditionNote = { noteNumber ->
                 viewModel.auditionMidiNote(latestTrack, noteNumber)
             },
-            onOpenPatchSelector = {
-                patchSelectorTrackTarget = latestTrack
-            },
             onOpenMidiRouting = {
                 midiRoutingTrackTarget = latestTrack
             },
@@ -681,7 +678,7 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
         )
     }
 
-    // MIDI Input Channel & Inter-App Routing Dialog
+    // MIDI Input / Output Channel & Inter-App Routing Dialog
     midiRoutingTrackTarget?.let { trackTarget ->
         val latestTrack = session.tracks.firstOrNull { it.id == trackTarget.id } ?: trackTarget
         MidiRoutingDialog(
@@ -690,34 +687,11 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
             lastMidiActivity = lastMidiActivity,
             isVirtualMidiBound = isVirtualMidiBound,
             virtualExternalSendersCount = virtualExternalSendersCount,
-            onSaveMidiRouting = { inputDeviceId, inputChannel ->
-                viewModel.updateMidiTrackRouting(latestTrack.id, inputDeviceId, inputChannel)
+            onSaveMidiRouting = { inDevId, inCh, outDevId, outCh ->
+                viewModel.updateMidiTrackRouting(latestTrack.id, inDevId, inCh, outDevId, outCh)
             },
             onRefreshMidiDevices = { viewModel.refreshMidiDevices() },
-            onOpenPatchSelector = { patchSelectorTrackTarget = latestTrack },
             onDismiss = { midiRoutingTrackTarget = null }
-        )
-    }
-
-    // All-Patches Synth Sound & Hardware Bank/PC Selector Dialog
-    patchSelectorTrackTarget?.let { trackTarget ->
-        val latestTrack = session.tracks.firstOrNull { it.id == trackTarget.id } ?: trackTarget
-        MidiPatchSelectorDialog(
-            track = latestTrack,
-            hasConnectedMidiDevice = connectedMidiDevices.isNotEmpty(),
-            onSelectPatch = { program, bankMsb, bankLsb, channel ->
-                viewModel.setTrackMidiPatch(latestTrack.id, program, bankMsb, bankLsb, channel)
-            },
-            onAuditionNote = { program, bankMsb, bankLsb, channel, noteNumber ->
-                viewModel.auditionPatchNote(
-                    program = program,
-                    bankMsb = bankMsb,
-                    bankLsb = bankLsb,
-                    channel = channel,
-                    noteNumber = noteNumber
-                )
-            },
-            onDismiss = { patchSelectorTrackTarget = null }
         )
     }
 

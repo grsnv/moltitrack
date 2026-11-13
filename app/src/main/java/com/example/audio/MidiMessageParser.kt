@@ -1,15 +1,52 @@
 package com.example.audio
 
 sealed class ParsedMidiMessage {
-    data class NoteOn(val channel: Int, val note: Int, val velocity: Int) : ParsedMidiMessage()
-    data class NoteOff(val channel: Int, val note: Int, val velocity: Int) : ParsedMidiMessage()
-    data class ProgramChange(val channel: Int, val program: Int) : ParsedMidiMessage()
-    data class ControlChange(val channel: Int, val controller: Int, val value: Int) : ParsedMidiMessage()
+    abstract val channel: Int
+
+    data class NoteOn(override val channel: Int, val note: Int, val velocity: Int) : ParsedMidiMessage()
+    data class NoteOff(override val channel: Int, val note: Int, val velocity: Int) : ParsedMidiMessage()
+    data class ControlChange(override val channel: Int, val controller: Int, val value: Int) : ParsedMidiMessage()
+    data class ProgramChange(override val channel: Int, val program: Int) : ParsedMidiMessage()
+    data class PitchBend(override val channel: Int, val value14Bit: Int) : ParsedMidiMessage()
+    data class ChannelPressure(override val channel: Int, val pressure: Int) : ParsedMidiMessage()
+    data class PolyPressure(override val channel: Int, val note: Int, val pressure: Int) : ParsedMidiMessage()
+}
+
+object MidiCcNames {
+    fun labelFor(cc: Int): String = when (cc) {
+        0 -> "Bank Select MSB"
+        1 -> "Mod Wheel"
+        2 -> "Breath"
+        4 -> "Foot Ctrl"
+        5 -> "Portamento Time"
+        7 -> "Volume"
+        8 -> "Balance"
+        10 -> "Pan"
+        11 -> "Expression"
+        32 -> "Bank Select LSB"
+        64 -> "Sustain Pedal"
+        65 -> "Portamento"
+        66 -> "Sostenuto"
+        67 -> "Soft Pedal"
+        71 -> "Resonance"
+        72 -> "Release Time"
+        73 -> "Attack Time"
+        74 -> "Filter Cutoff"
+        91 -> "Reverb Send"
+        93 -> "Chorus Send"
+        120 -> "All Sound Off"
+        121 -> "Reset All Ctrl"
+        123 -> "All Notes Off"
+        else -> "CC #$cc"
+    }
 }
 
 /**
- * Stateless parser for raw MIDI 1.0 byte streams (handles multi-message packets,
- * running status, 2-byte Program/Channel Pressure messages, SysEx, and Real-Time bytes).
+ * Stateless parser for raw MIDI 1.0 byte streams.
+ * Parses ALL channel voice messages (Note On/Off, Control Change 0-127,
+ * Program Change 0-127, 14-bit Pitch Bend, Channel Pressure, Poly Key Pressure)
+ * across channels 1..16, supporting multi-message buffers, running status,
+ * SysEx framing, and interleaved System Real-Time bytes.
  */
 object MidiMessageParser {
 
@@ -35,7 +72,6 @@ object MidiMessageParser {
                 if (b == 0xF7) {
                     inSysEx = false
                 } else if ((b and 0x80) != 0 && b != 0xF0) {
-                    // Non-realtime status aborts SysEx
                     inSysEx = false
                     continue
                 }
@@ -83,8 +119,12 @@ object MidiMessageParser {
                         i++
                     }
                 }
-                0xD0 -> { // Channel Pressure (1 data byte)
-                    if (i < end) i++
+                0xD0 -> { // Channel Pressure / Aftertouch (1 data byte)
+                    if (i < end) {
+                        val pressure = msg[i].toInt() and 0x7F
+                        results.add(ParsedMidiMessage.ChannelPressure(channel, pressure))
+                        i++
+                    }
                 }
                 0x80 -> { // Note Off (2 data bytes)
                     if (i + 1 < end) {
@@ -110,6 +150,16 @@ object MidiMessageParser {
                         i = end
                     }
                 }
+                0xA0 -> { // Polyphonic Key Pressure (2 data bytes)
+                    if (i + 1 < end) {
+                        val note = msg[i].toInt() and 0x7F
+                        val pressure = msg[i + 1].toInt() and 0x7F
+                        results.add(ParsedMidiMessage.PolyPressure(channel, note, pressure))
+                        i += 2
+                    } else {
+                        i = end
+                    }
+                }
                 0xB0 -> { // Control Change (2 data bytes)
                     if (i + 1 < end) {
                         val cc = msg[i].toInt() and 0x7F
@@ -120,8 +170,16 @@ object MidiMessageParser {
                         i = end
                     }
                 }
-                0xA0, 0xE0 -> { // Poly Aftertouch, Pitch Bend (2 data bytes)
-                    if (i + 1 < end) i += 2 else i = end
+                0xE0 -> { // Pitch Bend (LSB, MSB -> 14-bit value 0..16383, center 8192)
+                    if (i + 1 < end) {
+                        val lsb = msg[i].toInt() and 0x7F
+                        val msb = msg[i + 1].toInt() and 0x7F
+                        val value14Bit = (msb shl 7) or lsb
+                        results.add(ParsedMidiMessage.PitchBend(channel, value14Bit))
+                        i += 2
+                    } else {
+                        i = end
+                    }
                 }
                 else -> i++
             }

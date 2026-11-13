@@ -56,6 +56,7 @@ class MultiTrackRecorderEngine(
         if (isRecording.get()) return false
         val armedTracks = tracksToRecord.filter { it.isArmed }
         if (armedTracks.isEmpty()) return false
+        val armedAudioTracks = armedTracks.filter { it.type == com.example.model.TrackType.AUDIO }
 
         sessionDir.mkdirs()
         isRecording.set(true)
@@ -68,8 +69,8 @@ class MultiTrackRecorderEngine(
             val trackChannels = mutableMapOf<String, Int>() // 1 for mono, 2 for stereo
 
             try {
-                // Initialize WAV files for each armed track
-                for (track in armedTracks) {
+                // Initialize WAV files for each armed AUDIO track (MIDI tracks capture raw MIDI events directly)
+                for (track in armedAudioTracks) {
                     val file = File(sessionDir, "track_${track.id}_${System.currentTimeMillis()}.wav")
                     val out = FileOutputStream(file)
                     val channels = if (track.inputChannelMode == InputChannelMode.STEREO) 2 else 1
@@ -82,8 +83,8 @@ class MultiTrackRecorderEngine(
                     }
                 }
 
-                // Group armed tracks by physical input device
-                val tracksByDevice = armedTracks.groupBy { it.inputDeviceId }
+                // Group armed audio tracks by physical input device
+                val tracksByDevice = armedAudioTracks.groupBy { it.inputDeviceId }
                 val deviceJobs = mutableListOf<Job>()
                 val startTime = System.currentTimeMillis()
 
@@ -108,8 +109,14 @@ class MultiTrackRecorderEngine(
                     deviceJobs.add(job)
                 }
 
-                // Wait for stop
-                deviceJobs.forEach { it.join() }
+                if (deviceJobs.isEmpty()) {
+                    // MIDI-only recording: hold until stopRecording() is invoked
+                    while (isActive && isRecording.get()) {
+                        kotlinx.coroutines.delay(50)
+                    }
+                } else {
+                    deviceJobs.forEach { it.join() }
+                }
                 timerJob.cancel()
 
             } catch (e: Exception) {

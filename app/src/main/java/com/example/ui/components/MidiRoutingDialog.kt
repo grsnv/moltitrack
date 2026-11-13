@@ -26,7 +26,6 @@ import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SettingsInputComponent
 import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -35,7 +34,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,19 +75,25 @@ fun MidiRoutingDialog(
     lastMidiActivity: MidiActivityEvent?,
     isVirtualMidiBound: Boolean,
     virtualExternalSendersCount: Int,
-    onSaveMidiRouting: (inputDeviceId: String, inputChannel: Int) -> Unit,
+    onSaveMidiRouting: (
+        inputDeviceId: String,
+        inputChannel: Int,
+        outputDeviceId: String,
+        outputChannel: Int
+    ) -> Unit,
     onRefreshMidiDevices: () -> Unit,
-    onOpenPatchSelector: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val initialSource = remember(track.id, track.inputDeviceId) {
+    val initialInSource = remember(track.id, track.inputDeviceId) {
         when (track.inputDeviceId) {
             "", "default_mic", MidiRoutingConstants.LEGACY_USB_MIDI_ID -> MidiRoutingConstants.ALL_MIDI_INPUTS_ID
             else -> track.inputDeviceId
         }
     }
-    var selectedSourceId by remember(track.id) { mutableStateOf(initialSource) }
+    var selectedSourceId by remember(track.id) { mutableStateOf(initialInSource) }
     var selectedInputChannel by remember(track.id) { mutableIntStateOf(track.midiInputChannel) }
+    var selectedOutputId by remember(track.id) { mutableStateOf(track.midiOutputDeviceId) }
+    var selectedOutputChannel by remember(track.id) { mutableIntStateOf(track.midiChannel) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -146,7 +150,7 @@ fun MidiRoutingDialog(
                     .heightIn(max = 460.dp)
                     .verticalScroll(rememberScrollState())
             ) {
-                // Live Inter-App & Hardware MIDI Activity Monitor
+                // Live Inter-App & Hardware MIDI Parameter Monitor
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = StudioCardElevated),
@@ -170,7 +174,7 @@ fun MidiRoutingDialog(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "INTER-APP & MIDI MONITOR",
+                                    text = "LIVE MIDI PARAMETER MONITOR",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     fontFamily = FontFamily.Monospace,
@@ -198,13 +202,8 @@ fun MidiRoutingDialog(
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         val monitorText = lastMidiActivity?.let { evt ->
-                            if (evt.programChange != null) {
-                                "Last Rx: Ch ${evt.channel} • PC #${evt.programChange} (${evt.sourceName})"
-                            } else {
-                                val kind = if (evt.isNoteOn) "Note On" else "Note Off"
-                                "Last Rx: $kind • Ch ${evt.channel} • Note #${evt.noteNumber} (vel ${evt.velocity}) from ${evt.sourceName}"
-                            }
-                        } ?: "Select 'MultiTrack Virtual MIDI' in other synth/sequencer apps to route MIDI notes here, or pick an external app's MIDI port below."
+                            "Last Rx: Ch ${evt.channel} • ${evt.summaryText()} • ${evt.sourceName}"
+                        } ?: "Receives & records ALL MIDI parameters (Notes, CCs 0–127, Pitch Bend, Program Change, Aftertouch) from USB, BLE, or external MIDI apps."
                         Text(
                             text = monitorText,
                             fontSize = 11.sp,
@@ -227,10 +226,9 @@ fun MidiRoutingDialog(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Option 1: All MIDI Inputs
                 MidiSourceCard(
                     title = "All MIDI Inputs (Omni Sources)",
-                    subtitle = "Listen to Virtual Inter-App MIDI, USB controllers, and BLE MIDI simultaneously",
+                    subtitle = "Record all incoming MIDI parameters from Inter-App Virtual MIDI, USB, and BLE",
                     badge = "OMNI",
                     badgeColor = StudioCyan,
                     icon = Icons.Default.SettingsInputComponent,
@@ -239,10 +237,9 @@ fun MidiRoutingDialog(
                     onClick = { selectedSourceId = MidiRoutingConstants.ALL_MIDI_INPUTS_ID }
                 )
 
-                // Option 2: Dedicated MultiTrack Virtual MIDI Port (Receive from Other Apps)
                 MidiSourceCard(
                     title = "MultiTrack Virtual MIDI (From Other Apps)",
-                    subtitle = "Receive notes routed into MultiTrack's exported Android MIDI input service",
+                    subtitle = "Receive raw MIDI routed into MultiTrack's exported Android MIDI service",
                     badge = "INTER-APP",
                     badgeColor = StudioGreen,
                     icon = Icons.Default.SwapHoriz,
@@ -251,7 +248,6 @@ fun MidiRoutingDialog(
                     onClick = { selectedSourceId = MidiRoutingConstants.VIRTUAL_APP_MIDI_ID }
                 )
 
-                // Option 3: Discovered USB / BLE / External App Virtual Output Ports
                 if (connectedMidiDevices.isEmpty()) {
                     Surface(
                         modifier = Modifier
@@ -262,7 +258,7 @@ fun MidiRoutingDialog(
                         border = BorderStroke(1.dp, StudioBorder)
                     ) {
                         Text(
-                            text = "No external USB MIDI controllers or third-party app virtual ports detected right now. Tap refresh after launching another MIDI app or connecting USB OTG.",
+                            text = "No external USB/BLE controllers or third-party app virtual MIDI ports detected yet. Tap refresh after opening another MIDI app or plugging USB OTG.",
                             fontSize = 11.sp,
                             color = StudioTextMuted,
                             modifier = Modifier.padding(10.dp),
@@ -296,7 +292,7 @@ fun MidiRoutingDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // SECTION 2: MIDI INPUT CHANNEL FILTER (OMNI OR 1..16)
+                // SECTION 2: MIDI INPUT CHANNEL FILTER
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -317,14 +313,8 @@ fun MidiRoutingDialog(
                         color = StudioYellow
                     )
                 }
-                Text(
-                    text = "Assign different MIDI channels to separate tracks to split multi-timbral sequencers or controllers.",
-                    fontSize = 10.sp,
-                    color = StudioTextSecondary,
-                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
-                )
+                Spacer(modifier = Modifier.height(6.dp))
 
-                // Omni Button
                 val isOmni = selectedInputChannel == MidiRoutingConstants.CHANNEL_OMNI
                 Surface(
                     modifier = Modifier
@@ -354,19 +344,13 @@ fun MidiRoutingDialog(
                             color = if (isOmni) StudioYellow else StudioTextPrimary
                         )
                         if (isOmni) {
-                            Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = "Selected Omni",
-                                tint = StudioYellow,
-                                modifier = Modifier.size(16.dp)
-                            )
+                            Icon(Icons.Default.Check, "Selected Omni", tint = StudioYellow, modifier = Modifier.size(16.dp))
                         }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Channels 1..16 in a 4x4 grid
                 for (row in 0 until 4) {
                     Row(
                         modifier = Modifier
@@ -380,7 +364,7 @@ fun MidiRoutingDialog(
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .heightIn(min = 42.dp)
+                                    .heightIn(min = 40.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(if (isSelected) StudioYellow else StudioCard)
                                     .border(
@@ -405,40 +389,156 @@ fun MidiRoutingDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Quick Shortcut to Output Patch & Out Channel Selector
-                OutlinedButton(
-                    onClick = {
-                        onSaveMidiRouting(selectedSourceId, selectedInputChannel)
-                        onDismiss()
-                        onOpenPatchSelector()
-                    },
-                    border = BorderStroke(1.dp, StudioYellow.copy(alpha = 0.6f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("midi_routing_open_patches_btn")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Tune,
-                        contentDescription = null,
-                        tint = StudioYellow,
-                        modifier = Modifier.size(16.dp)
+                // SECTION 3: MIDI OUTPUT / THRU DESTINATION (REPLAY RECORDED PARAMETERS)
+                Text(
+                    text = "MIDI OUTPUT / THRU DESTINATION",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = StudioTextMuted
+                )
+                Text(
+                    text = "Forward live & recorded MIDI parameters (Notes, CCs, Pitch Bend, PC, Aftertouch) out to:",
+                    fontSize = 10.sp,
+                    color = StudioTextSecondary,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
+                )
+
+                MidiSourceCard(
+                    title = "All Connected MIDI Outputs",
+                    subtitle = "Send live Thru & playback parameters to connected USB/BLE/App MIDI inputs",
+                    badge = "ALL OUT",
+                    badgeColor = StudioCyan,
+                    icon = Icons.Default.SwapHoriz,
+                    isSelected = selectedOutputId == MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID,
+                    testTag = "midi_out_all",
+                    onClick = { selectedOutputId = MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID }
+                )
+
+                MidiSourceCard(
+                    title = "Monitor Only (No External MIDI Out)",
+                    subtitle = "Record & inspect parameters locally without sending MIDI Out",
+                    badge = "OFF",
+                    badgeColor = StudioTextMuted,
+                    icon = Icons.Default.SettingsInputComponent,
+                    isSelected = selectedOutputId == MidiRoutingConstants.NO_MIDI_OUTPUT_ID,
+                    testTag = "midi_out_none",
+                    onClick = { selectedOutputId = MidiRoutingConstants.NO_MIDI_OUTPUT_ID }
+                )
+
+                connectedMidiDevices.filter { it.inputPortCount > 0 }.forEach { dev ->
+                    MidiSourceCard(
+                        title = "Out -> ${dev.name}",
+                        subtitle = "${dev.manufacturer} • ${dev.inputPortCount} Input Port(s)",
+                        badge = dev.typeBadge,
+                        badgeColor = StudioGreen,
+                        icon = if (dev.isVirtual) Icons.Default.Piano else Icons.Default.Usb,
+                        isSelected = selectedOutputId == dev.deviceKey,
+                        testTag = "midi_out_${dev.deviceKey}",
+                        onClick = { selectedOutputId = dev.deviceKey }
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Output Channel Mapping
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
-                        text = "Patch #${track.midiProgram + 1}: ${track.patchInfo.name} (Out Ch ${track.midiChannel})",
+                        text = "MIDI OUTPUT CHANNEL",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = StudioYellow
+                        fontFamily = FontFamily.Monospace,
+                        color = StudioTextMuted
                     )
+                    Text(
+                        text = if (selectedOutputChannel == 0) "Preserve Original" else "Force Ch $selectedOutputChannel",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = StudioGreen
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+
+                val isOrigOut = selectedOutputChannel == MidiRoutingConstants.CHANNEL_OMNI
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 40.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, if (isOrigOut) StudioGreen else StudioBorder, RoundedCornerShape(8.dp))
+                        .clickable { selectedOutputChannel = MidiRoutingConstants.CHANNEL_OMNI }
+                        .testTag("midi_out_ch_0"),
+                    color = if (isOrigOut) StudioGreen.copy(alpha = 0.16f) else StudioCard
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Preserve Input Channel (1:1 Raw Pass-Through)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isOrigOut) StudioGreen else StudioTextPrimary
+                        )
+                        if (isOrigOut) {
+                            Icon(Icons.Default.Check, null, tint = StudioGreen, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                for (row in 0 until 4) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        for (col in 1..4) {
+                            val ch = row * 4 + col
+                            val isSelected = selectedOutputChannel == ch
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 36.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isSelected) StudioGreen else StudioCard)
+                                    .border(1.dp, if (isSelected) StudioGreen else StudioBorder, RoundedCornerShape(6.dp))
+                                    .clickable { selectedOutputChannel = ch }
+                                    .testTag("midi_out_ch_$ch"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Ch $ch",
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = if (isSelected) FontWeight.Black else FontWeight.Medium,
+                                    color = if (isSelected) StudioDark else StudioTextPrimary
+                                )
+                            }
+                        }
+                    }
                 }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    onSaveMidiRouting(selectedSourceId, selectedInputChannel)
+                    onSaveMidiRouting(
+                        selectedSourceId,
+                        selectedInputChannel,
+                        selectedOutputId,
+                        selectedOutputChannel
+                    )
                     onDismiss()
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = StudioCyan),
