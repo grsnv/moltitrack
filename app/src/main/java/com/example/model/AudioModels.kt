@@ -60,6 +60,24 @@ data class MidiNote(
         }
 }
 
+object MidiRoutingConstants {
+    const val ALL_MIDI_INPUTS_ID = "all_midi"
+    const val VIRTUAL_APP_MIDI_ID = "virtual_app_midi"
+    const val LEGACY_USB_MIDI_ID = "usb_midi"
+    const val CHANNEL_OMNI = 0 // 0 = All MIDI Channels (1..16)
+}
+
+data class MidiActivityEvent(
+    val sourceId: String,
+    val sourceName: String,
+    val channel: Int, // 1..16
+    val noteNumber: Int, // 0..127, or -1 if Program Change
+    val velocity: Int,
+    val isNoteOn: Boolean,
+    val programChange: Int? = null,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 data class TrackModel(
     val id: String,
     val name: String,
@@ -81,10 +99,27 @@ data class TrackModel(
     val midiProgram: Int = 0, // 0 to 127 (General MIDI & Hardware Program Change)
     val midiBankMsb: Int = 0, // 0 to 127 (Bank Select CC 0)
     val midiBankLsb: Int = 0, // 0 to 127 (Bank Select CC 32)
-    val midiChannel: Int = 1 // 1 to 16
+    val midiChannel: Int = 1, // 1 to 16 (MIDI Output Channel)
+    val midiInputChannel: Int = MidiRoutingConstants.CHANNEL_OMNI // 0 = Omni (All), 1..16 = specific input channel
 ) {
     val color: Color get() = Color(colorHex.toULong())
     val patchInfo: MidiPatchInfo get() = GeneralMidiPatches.findPatch(midiProgram)
+
+    val midiInputChannelLabel: String
+        get() = if (midiInputChannel == MidiRoutingConstants.CHANNEL_OMNI) "Omni (All)" else "Ch $midiInputChannel"
+
+    fun matchesMidiInput(sourceId: String, channel: Int): Boolean {
+        if (type != TrackType.MIDI || !isArmed) return false
+        val deviceMatches = when (inputDeviceId) {
+            MidiRoutingConstants.ALL_MIDI_INPUTS_ID,
+            MidiRoutingConstants.LEGACY_USB_MIDI_ID,
+            "",
+            "default_mic" -> true
+            else -> inputDeviceId == sourceId
+        }
+        val channelMatches = (midiInputChannel == MidiRoutingConstants.CHANNEL_OMNI) || (midiInputChannel == channel)
+        return deviceMatches && channelMatches
+    }
 }
 
 data class RecordingSession(

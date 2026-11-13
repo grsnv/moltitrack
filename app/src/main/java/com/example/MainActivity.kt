@@ -83,6 +83,8 @@ import com.example.model.TrackModel
 import com.example.ui.components.ExportDialog
 import com.example.ui.components.InputRoutingDialog
 import com.example.ui.components.MasterTransportBar
+import com.example.ui.components.MidiPatchSelectorDialog
+import com.example.ui.components.MidiRoutingDialog
 import com.example.ui.components.PianoRollModal
 import com.example.ui.components.TrackLaneCard
 import com.example.ui.theme.MultiTrackTheme
@@ -140,6 +142,9 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
     val availableInputs by viewModel.availableInputs.collectAsStateWithLifecycle()
     val connectedUsbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
     val connectedMidiDevices by viewModel.connectedMidiDevices.collectAsStateWithLifecycle()
+    val lastMidiActivity by viewModel.lastMidiActivity.collectAsStateWithLifecycle()
+    val isVirtualMidiBound by viewModel.isVirtualMidiBound.collectAsStateWithLifecycle()
+    val virtualExternalSendersCount by viewModel.virtualExternalSendersCount.collectAsStateWithLifecycle()
     val selectedBufferSize by viewModel.selectedBufferSize.collectAsStateWithLifecycle()
     val selectedSampleRate by viewModel.selectedSampleRate.collectAsStateWithLifecycle()
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
@@ -154,6 +159,8 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
 
     // Dialog States
     var routingTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
+    var midiRoutingTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
+    var patchSelectorTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
     var pianoRollTrackTarget by remember { mutableStateOf<TrackModel?>(null) }
     var showAddTrackTypeDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
@@ -319,8 +326,13 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(6.dp))
                             .clickable {
-                                // Open routing for first track or general routing
-                                routingTrackTarget = session.tracks.firstOrNull()
+                                val target = session.tracks.firstOrNull { it.type == com.example.model.TrackType.AUDIO }
+                                    ?: session.tracks.firstOrNull()
+                                if (target?.type == com.example.model.TrackType.MIDI) {
+                                    midiRoutingTrackTarget = target
+                                } else {
+                                    routingTrackTarget = target
+                                }
                             },
                         color = if (hasUsb) StudioGreen.copy(alpha = 0.12f) else StudioCardElevated,
                         border = androidx.compose.foundation.BorderStroke(
@@ -469,6 +481,7 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                     TrackLaneCard(
                         track = track,
                         inputDevice = inputDevice,
+                        connectedMidiDevices = connectedMidiDevices,
                         isRecordingActive = isRecording,
                         playheadProgress = playheadFrac,
                         meterLevel = meterLevel,
@@ -483,6 +496,8 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                         },
                         onOpenRouting = { routingTrackTarget = track },
                         onOpenPianoRoll = { pianoRollTrackTarget = track },
+                        onOpenMidiRouting = { midiRoutingTrackTarget = track },
+                        onOpenPatchSelector = { patchSelectorTrackTarget = track },
                         onRename = { newName -> viewModel.renameTrack(track.id, newName) },
                         onClearAudio = { viewModel.clearTrackAudio(track.id) },
                         onDeleteTrack = { viewModel.deleteTrack(track.id) }
@@ -653,10 +668,56 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
             onClearNotes = {
                 viewModel.clearMidiNotes(latestTrack.id)
             },
-            onChangeInstrument = { inst ->
-                viewModel.changeTrackInstrument(latestTrack.id, inst)
+            onAuditionNote = { noteNumber ->
+                viewModel.auditionMidiNote(latestTrack, noteNumber)
+            },
+            onOpenPatchSelector = {
+                patchSelectorTrackTarget = latestTrack
+            },
+            onOpenMidiRouting = {
+                midiRoutingTrackTarget = latestTrack
             },
             onDismiss = { pianoRollTrackTarget = null }
+        )
+    }
+
+    // MIDI Input Channel & Inter-App Routing Dialog
+    midiRoutingTrackTarget?.let { trackTarget ->
+        val latestTrack = session.tracks.firstOrNull { it.id == trackTarget.id } ?: trackTarget
+        MidiRoutingDialog(
+            track = latestTrack,
+            connectedMidiDevices = connectedMidiDevices,
+            lastMidiActivity = lastMidiActivity,
+            isVirtualMidiBound = isVirtualMidiBound,
+            virtualExternalSendersCount = virtualExternalSendersCount,
+            onSaveMidiRouting = { inputDeviceId, inputChannel ->
+                viewModel.updateMidiTrackRouting(latestTrack.id, inputDeviceId, inputChannel)
+            },
+            onRefreshMidiDevices = { viewModel.refreshMidiDevices() },
+            onOpenPatchSelector = { patchSelectorTrackTarget = latestTrack },
+            onDismiss = { midiRoutingTrackTarget = null }
+        )
+    }
+
+    // All-Patches Synth Sound & Hardware Bank/PC Selector Dialog
+    patchSelectorTrackTarget?.let { trackTarget ->
+        val latestTrack = session.tracks.firstOrNull { it.id == trackTarget.id } ?: trackTarget
+        MidiPatchSelectorDialog(
+            track = latestTrack,
+            hasConnectedMidiDevice = connectedMidiDevices.isNotEmpty(),
+            onSelectPatch = { program, bankMsb, bankLsb, channel ->
+                viewModel.setTrackMidiPatch(latestTrack.id, program, bankMsb, bankLsb, channel)
+            },
+            onAuditionNote = { program, bankMsb, bankLsb, channel, noteNumber ->
+                viewModel.auditionPatchNote(
+                    program = program,
+                    bankMsb = bankMsb,
+                    bankLsb = bankLsb,
+                    channel = channel,
+                    noteNumber = noteNumber
+                )
+            },
+            onDismiss = { patchSelectorTrackTarget = null }
         )
     }
 

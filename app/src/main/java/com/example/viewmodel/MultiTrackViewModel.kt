@@ -35,12 +35,13 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
     val selectedBufferSize = usbInterfaceManager.selectedBufferSize
     val selectedSampleRate = usbInterfaceManager.selectedSampleRate
 
-    private val midiManager = com.example.audio.AndroidMidiManager(application) { noteNumber, velocity, isNoteOn ->
-        if (isNoteOn) {
-            handleExternalMidiNote(noteNumber, velocity)
-        }
+    private val midiManager = com.example.audio.AndroidMidiManager(application) { event ->
+        handleExternalMidiEvent(event)
     }
     val connectedMidiDevices = midiManager.connectedMidiDevices
+    val lastMidiActivity = midiManager.lastMidiActivity
+    val isVirtualMidiBound = midiManager.isVirtualServiceBound
+    val virtualExternalSendersCount = midiManager.virtualExternalSendersCount
 
     private val recorderEngine = MultiTrackRecorderEngine(application, viewModelScope)
     private val playerEngine = MultiTrackPlayerEngine(viewModelScope)
@@ -227,7 +228,8 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             name = "MIDI Track ${nextIndex + 1}",
             type = com.example.model.TrackType.MIDI,
             colorHex = color.value.toLong(),
-            inputDeviceId = "usb_midi",
+            inputDeviceId = com.example.model.MidiRoutingConstants.ALL_MIDI_INPUTS_ID,
+            midiInputChannel = com.example.model.MidiRoutingConstants.CHANNEL_OMNI,
             instrument = com.example.model.SynthInstrument.SYNTH_LEAD,
             isArmed = true,
             audioFilePath = midiFile.absolutePath
@@ -238,7 +240,7 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         _currentSession.value = _currentSession.value.copy(
             tracks = currentTracks + newTrack
         )
-        _userMessage.value = "Added MIDI Track: ${newTrack.name}. Tap Keys / Piano Roll to compose!"
+        _userMessage.value = "Added MIDI Track: ${newTrack.name}. Tap Keys or MIDI Input to route!"
     }
 
     fun addMidiNoteToTrack(trackId: String, note: com.example.model.MidiNote) {
@@ -327,27 +329,68 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun auditionMidiNote(track: TrackModel, noteNumber: Int) {
-        midiManager.sendNoteOn(track.midiChannel, noteNumber, 100)
+        auditionPatchNote(
+            program = track.midiProgram,
+            bankMsb = track.midiBankMsb,
+            bankLsb = track.midiBankLsb,
+            channel = track.midiChannel,
+            instrument = track.instrument,
+            noteNumber = noteNumber,
+            sendPcFirst = false
+        )
+    }
+
+    fun auditionPatchNote(
+        program: Int,
+        bankMsb: Int,
+        bankLsb: Int,
+        channel: Int,
+        instrument: com.example.model.SynthInstrument = com.example.model.GeneralMidiPatches.findPatch(program).synthFamily,
+        noteNumber: Int = 60,
+        sendPcFirst: Boolean = true
+    ) {
+        if (sendPcFirst) {
+            midiManager.sendProgramChange(channel, program, bankMsb, bankLsb)
+        }
+        midiManager.sendNoteOn(channel, noteNumber, 100)
         com.example.audio.MidiSynthEngine.playNoteLive(
             noteNumber = noteNumber,
-            instrument = track.instrument,
+            instrument = instrument,
             scope = viewModelScope,
             durationMs = 450L,
-            midiProgram = track.midiProgram
+            midiProgram = program
         )
         viewModelScope.launch {
             kotlinx.coroutines.delay(400)
-            midiManager.sendNoteOff(track.midiChannel, noteNumber)
+            midiManager.sendNoteOff(channel, noteNumber)
         }
     }
 
-    private fun handleExternalMidiNote(noteNumber: Int, velocity: Int) {
-        val armedMidiTracks = _currentSession.value.tracks.filter { it.type == com.example.model.TrackType.MIDI && it.isArmed }
-        if (armedMidiTracks.isEmpty()) return
+    private fun handleExternalMidiEvent(event: com.example.model.MidiActivityEvent) {
+        val matchingTracks = _currentSession.value.tracks.filter {
+            it.matchesMidiInput(event.sourceId, event.channel)
+        }
+        if (matchingTracks.isEmpty()) return
 
-        for (track in armedMidiTracks) {
+        // Handle incoming Program Change from external app or controller
+        val pc = event.programChange
+        if (pc != null) {
+            val patch = com.example.model.GeneralMidiPatches.findPatch(pc)
+            _currentSession.value = _currentSession.value.copy(
+                tracks = _currentSession.value.tracks.map { t ->
+                    if (matchingTracks.any { it.id == t.id }) {
+                        t.copy(midiProgram = pc, instrument = patch.synthFamily)
+                    } else t
+                }
+            )
+            return
+        }
+
+        if (!event.isNoteOn || event.noteNumber < 0) return
+
+        for (track in matchingTracks) {
             com.example.audio.MidiSynthEngine.playNoteLive(
-                noteNumber = noteNumber,
+                noteNumber = event.noteNumber,
                 instrument = track.instrument,
                 scope = viewModelScope,
                 midiProgram = track.midiProgram
@@ -355,14 +398,35 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             if (isRecording.value) {
                 val newNote = com.example.model.MidiNote(
                     id = UUID.randomUUID().toString(),
-                    noteNumber = noteNumber,
+                    noteNumber = event.noteNumber,
                     startMs = recordDurationMs.value,
                     durationMs = 400L,
-                    velocity = velocity
+                    velocity = event.velocity.coerceIn(1, 127)
                 )
                 addMidiNoteToTrack(track.id, newNote)
             }
         }
+    }
+
+    fun updateMidiTrackRouting(trackId: String, inputDeviceId: String, inputChannel: Int) {
+        val clampedChannel = inputChannel.coerceIn(0, 16)
+        _currentSession.value = _currentSession.value.copy(
+            tracks = _currentSession.value.tracks.map {
+                if (it.id == trackId) {
+                    it.copy(
+                        inputDeviceId = inputDeviceId,
+                        midiInputChannel = clampedChannel
+                    )
+                } else it
+            }
+        )
+        val chLabel = if (clampedChannel == 0) "Omni (All Ch)" else "Ch $clampedChannel"
+        _userMessage.value = "Updated MIDI Input routing ($chLabel)"
+    }
+
+    fun refreshMidiDevices() {
+        midiManager.scanMidiDevices()
+        _userMessage.value = "Scanned USB & Inter-App MIDI ports"
     }
 
     fun deleteTrack(trackId: String) {
@@ -520,7 +584,8 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 name = "Track 3 - Synth Lead (MIDI)",
                 type = com.example.model.TrackType.MIDI,
                 colorHex = TrackColors[2].value.toLong(),
-                inputDeviceId = "usb_midi",
+                inputDeviceId = com.example.model.MidiRoutingConstants.ALL_MIDI_INPUTS_ID,
+                midiInputChannel = com.example.model.MidiRoutingConstants.CHANNEL_OMNI,
                 instrument = com.example.model.SynthInstrument.SYNTH_LEAD,
                 midiNotes = demoMidiNotes,
                 volume = 0.9f,

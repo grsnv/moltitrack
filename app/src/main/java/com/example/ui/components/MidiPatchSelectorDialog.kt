@@ -82,7 +82,7 @@ fun MidiPatchSelectorDialog(
     track: TrackModel,
     hasConnectedMidiDevice: Boolean,
     onSelectPatch: (program: Int, bankMsb: Int, bankLsb: Int, channel: Int) -> Unit,
-    onAuditionNote: (note: Int) -> Unit,
+    onAuditionNote: (program: Int, bankMsb: Int, bankLsb: Int, channel: Int, note: Int) -> Unit,
     onDismiss: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = GM Sound Library, 1 = Direct Hardware Bank/Program
@@ -244,7 +244,7 @@ fun MidiPatchSelectorDialog(
                                     )
                                     .clickable {
                                         selectedProgram = patch.programNumber
-                                        onAuditionNote(60) // Audition note C4
+                                        onAuditionNote(patch.programNumber, bankMsb, bankLsb, midiChannel, 60)
                                     }
                                     .testTag("patch_item_${patch.programNumber}"),
                                 color = if (isSelected) StudioCardElevated else StudioCard
@@ -293,7 +293,7 @@ fun MidiPatchSelectorDialog(
                                         IconButton(
                                             onClick = {
                                                 selectedProgram = patch.programNumber
-                                                onAuditionNote(60)
+                                                onAuditionNote(patch.programNumber, bankMsb, bankLsb, midiChannel, 60)
                                             },
                                             modifier = Modifier.size(28.dp)
                                         ) {
@@ -449,7 +449,7 @@ fun MidiPatchSelectorDialog(
 
                     // Audition Note Button
                     Button(
-                        onClick = { onAuditionNote(60) },
+                        onClick = { onAuditionNote(selectedProgram, bankMsb, bankLsb, midiChannel, 60) },
                         colors = ButtonDefaults.buttonColors(containerColor = StudioCardElevated),
                         modifier = Modifier.fillMaxWidth()
                     ) {

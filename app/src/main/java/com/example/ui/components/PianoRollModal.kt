@@ -92,13 +92,13 @@ fun PianoRollModal(
     onAddNote: (MidiNote) -> Unit,
     onRemoveNote: (String) -> Unit,
     onClearNotes: () -> Unit,
-    onChangeInstrument: (SynthInstrument) -> Unit,
+    onAuditionNote: (Int) -> Unit,
+    onOpenPatchSelector: () -> Unit,
+    onOpenMidiRouting: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val scope = rememberCoroutineScope()
     var selectedOctave by remember { mutableIntStateOf(4) } // Default Octave 4 (Middle C is 60)
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Touch Keys, 1 = Piano Roll Grid
-    var showInstrumentMenu by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -124,38 +124,46 @@ fun PianoRollModal(
                             color = StudioTextPrimary
                         )
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(StudioCardElevated)
-                                .clickable { showInstrumentMenu = true }
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "Synth: ${track.instrument.displayName}",
-                                fontSize = 11.sp,
-                                color = StudioYellow,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Icon(
-                                imageVector = Icons.Default.Tune,
-                                contentDescription = null,
-                                tint = StudioYellow,
-                                modifier = Modifier.size(12.dp).padding(start = 2.dp)
-                            )
-                        }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(StudioCardElevated)
+                                    .clickable { onOpenPatchSelector() }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    .testTag("piano_roll_patch_btn")
+                            ) {
+                                Text(
+                                    text = "#${track.midiProgram + 1} ${track.patchInfo.name}",
+                                    fontSize = 11.sp,
+                                    color = StudioYellow,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.Tune,
+                                    contentDescription = "Select Sound Patch",
+                                    tint = StudioYellow,
+                                    modifier = Modifier.size(12.dp).padding(start = 2.dp)
+                                )
+                            }
 
-                        DropdownMenu(
-                            expanded = showInstrumentMenu,
-                            onDismissRequest = { showInstrumentMenu = false }
-                        ) {
-                            SynthInstrument.entries.forEach { inst ->
-                                DropdownMenuItem(
-                                    text = { Text("${inst.displayName} (${inst.category})") },
-                                    onClick = {
-                                        onChangeInstrument(inst)
-                                        showInstrumentMenu = false
-                                    }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(StudioCardElevated)
+                                    .clickable { onOpenMidiRouting() }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    .testTag("piano_roll_routing_btn")
+                            ) {
+                                Text(
+                                    text = "In: ${if (track.midiInputChannel == 0) "Omni" else "Ch ${track.midiInputChannel}"}",
+                                    fontSize = 11.sp,
+                                    color = StudioCyan,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
@@ -184,7 +192,10 @@ fun PianoRollModal(
                     )
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenMidiRouting() }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -195,9 +206,9 @@ fun PianoRollModal(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         val midiStatus = if (connectedMidiDevices.isNotEmpty()) {
-                            "USB MIDI Connected: ${connectedMidiDevices.first().name}"
+                            "MIDI Active: ${connectedMidiDevices.first().name} + Inter-App Virtual Port"
                         } else {
-                            "USB MIDI Keyboard: Ready (Plug in any USB MIDI controller via OTG)"
+                            "Virtual Inter-App MIDI Active • Tap to configure Input Ch & Apps"
                         }
                         Text(
                             text = midiStatus,
@@ -277,8 +288,8 @@ fun PianoRollModal(
                     VirtualTouchKeyboard(
                         baseOctave = selectedOctave,
                         onKeyPress = { noteNumber ->
-                            // Play live synth sound
-                            MidiSynthEngine.playNoteLive(noteNumber, track.instrument, scope)
+                            // Play live synth & send to connected hardware/virtual synth
+                            onAuditionNote(noteNumber)
 
                             // Add note to track
                             val noteTime = if (isRecording) currentTimeMs else 0L
@@ -418,7 +429,7 @@ fun PianoRollModal(
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             IconButton(
                                                 onClick = {
-                                                    MidiSynthEngine.playNoteLive(note.noteNumber, track.instrument, scope)
+                                                    onAuditionNote(note.noteNumber)
                                                 },
                                                 modifier = Modifier.size(28.dp)
                                             ) {

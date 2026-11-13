@@ -10,31 +10,59 @@ import android.media.midi.MidiReceiver
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import androidx.core.content.ContextCompat
+import com.example.model.MidiActivityEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.ConcurrentHashMap
 
 data class UsbMidiDeviceItem(
     val id: Int,
     val name: String,
     val manufacturer: String,
     val inputPortCount: Int,
-    val outputPortCount: Int
-)
+    val outputPortCount: Int,
+    val deviceType: Int = MidiDeviceInfo.TYPE_USB,
+    val deviceKey: String = "midi_dev_$id"
+) {
+    val isVirtual: Boolean get() = deviceType == MidiDeviceInfo.TYPE_VIRTUAL
+    val isBluetooth: Boolean get() = deviceType == MidiDeviceInfo.TYPE_BLUETOOTH
+    val typeBadge: String
+        get() = when (deviceType) {
+            MidiDeviceInfo.TYPE_VIRTUAL -> "APP MIDI"
+            MidiDeviceInfo.TYPE_BLUETOOTH -> "BLE MIDI"
+            else -> "USB MIDI"
+        }
+}
 
 class AndroidMidiManager(
     private val context: Context,
-    private val onMidiNoteReceived: (noteNumber: Int, velocity: Int, isNoteOn: Boolean) -> Unit
+    private val onMidiEventReceived: (MidiActivityEvent) -> Unit
 ) {
     private val midiManager: MidiManager? =
         context.getSystemService(Context.MIDI_SERVICE) as? MidiManager
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     private val _connectedMidiDevices = MutableStateFlow<List<UsbMidiDeviceItem>>(emptyList())
     val connectedMidiDevices: StateFlow<List<UsbMidiDeviceItem>> = _connectedMidiDevices.asStateFlow()
 
-    private val openDevices = mutableListOf<MidiDevice>()
-    private val openOutputPorts = mutableListOf<MidiOutputPort>()
-    private val openInputPorts = mutableListOf<MidiInputPort>()
+    private val _lastMidiActivity = MutableStateFlow<MidiActivityEvent?>(null)
+    val lastMidiActivity: StateFlow<MidiActivityEvent?> = _lastMidiActivity.asStateFlow()
+
+    val isVirtualServiceBound: StateFlow<Boolean> = VirtualMidiRouter.isServiceBound
+    val virtualExternalSendersCount: StateFlow<Int> = VirtualMidiRouter.connectedExternalSenders
+
+    private val openDevices = ConcurrentHashMap<Int, MidiDevice>()
+    private val openOutputPorts = ConcurrentHashMap<Int, MutableList<MidiOutputPort>>()
+    private val openInputPorts = ConcurrentHashMap<Int, MutableList<MidiInputPort>>()
+    private val pendingOpenIds = ConcurrentHashMap.newKeySet<Int>()
+
+    private val virtualRouterListener: (MidiActivityEvent) -> Unit = { event ->
+        _lastMidiActivity.value = event
+        onMidiEventReceived(event)
+    }
 
     private val midiCallback = object : MidiManager.DeviceCallback() {
         override fun onDeviceAdded(device: MidiDeviceInfo?) {
@@ -42,13 +70,42 @@ class AndroidMidiManager(
         }
 
         override fun onDeviceRemoved(device: MidiDeviceInfo?) {
+            if (device != null) {
+                closeDeviceById(device.id)
+            }
             scanMidiDevices()
         }
     }
 
     init {
-        midiManager?.registerDeviceCallback(midiCallback, Handler(Looper.getMainLooper()))
+        VirtualMidiRouter.addListener(virtualRouterListener)
+        registerMidiCallback()
         scanMidiDevices()
+    }
+
+    private fun registerMidiCallback() {
+        val manager = midiManager ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                manager.registerDeviceCallback(
+                    MidiManager.TRANSPORT_MIDI_BYTE_STREAM,
+                    ContextCompat.getMainExecutor(context),
+                    midiCallback
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                manager.registerDeviceCallback(midiCallback, mainHandler)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun isOwnVirtualDevice(info: MidiDeviceInfo): Boolean {
+        val props = info.properties
+        val product = props.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
+        val name = props.getString(MidiDeviceInfo.PROPERTY_NAME)
+        return product == "MultiTrack DAW" || name == "MultiTrack Virtual MIDI"
     }
 
     fun scanMidiDevices() {
@@ -56,13 +113,30 @@ class AndroidMidiManager(
         val list = mutableListOf<UsbMidiDeviceItem>()
 
         try {
-            val devices = manager.devices
+            val devices: Collection<MidiDeviceInfo> =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    manager.getDevicesForTransport(MidiManager.TRANSPORT_MIDI_BYTE_STREAM)
+                } else {
+                    @Suppress("DEPRECATION")
+                    manager.devices.toList()
+                }
+
             for (info in devices) {
+                if (isOwnVirtualDevice(info)) continue
+
                 val props = info.properties
+                val fallbackPrefix = when (info.type) {
+                    MidiDeviceInfo.TYPE_VIRTUAL -> "App MIDI Port"
+                    MidiDeviceInfo.TYPE_BLUETOOTH -> "BLE MIDI"
+                    else -> "USB MIDI Device"
+                }
                 val name = props.getString(MidiDeviceInfo.PROPERTY_NAME)
                     ?: props.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
-                    ?: "USB MIDI Device #${info.id}"
-                val mfg = props.getString(MidiDeviceInfo.PROPERTY_MANUFACTURER) ?: "Generic MIDI"
+                    ?: "$fallbackPrefix #${info.id}"
+                val mfg = props.getString(MidiDeviceInfo.PROPERTY_MANUFACTURER)
+                    ?: if (info.type == MidiDeviceInfo.TYPE_VIRTUAL) "External App" else "Generic MIDI"
+
+                val deviceKey = "midi_dev_${info.id}"
 
                 list.add(
                     UsbMidiDeviceItem(
@@ -70,51 +144,86 @@ class AndroidMidiManager(
                         name = name,
                         manufacturer = mfg,
                         inputPortCount = info.inputPortCount,
-                        outputPortCount = info.outputPortCount
+                        outputPortCount = info.outputPortCount,
+                        deviceType = info.type,
+                        deviceKey = deviceKey
                     )
                 )
 
-                // Open device output port to listen to Note On / Note Off
-                // and open input port to send Program Change, Bank Select, and Notes to the hardware synth!
-                if (info.outputPortCount > 0 || info.inputPortCount > 0) {
+                val alreadyOpen = openDevices.containsKey(info.id) || pendingOpenIds.contains(info.id)
+                if (!alreadyOpen && (info.outputPortCount > 0 || info.inputPortCount > 0)) {
+                    pendingOpenIds.add(info.id)
                     manager.openDevice(info, { device ->
+                        pendingOpenIds.remove(info.id)
                         if (device != null) {
-                            openDevices.add(device)
+                            openDevices[info.id] = device
 
                             if (info.outputPortCount > 0) {
-                                val outPort = device.openOutputPort(0)
-                                if (outPort != null) {
-                                    openOutputPorts.add(outPort)
-                                    outPort.connect(object : MidiReceiver() {
-                                        override fun onSend(msg: ByteArray?, offset: Int, count: Int, timestamp: Long) {
-                                            if (msg == null || count < 3) return
-                                            val status = msg[offset].toInt() and 0xFF
-                                            val note = msg[offset + 1].toInt() and 0xFF
-                                            val velocity = msg[offset + 2].toInt() and 0xFF
-
-                                            val command = status and 0xF0
-                                            if (command == 0x90 && velocity > 0) {
-                                                // Note On
-                                                onMidiNoteReceived(note, velocity, true)
-                                            } else if (command == 0x80 || (command == 0x90 && velocity == 0)) {
-                                                // Note Off
-                                                onMidiNoteReceived(note, velocity, false)
+                                val outList = mutableListOf<MidiOutputPort>()
+                                for (portIdx in 0 until info.outputPortCount) {
+                                    val outPort = device.openOutputPort(portIdx)
+                                    if (outPort != null) {
+                                        outList.add(outPort)
+                                        outPort.connect(object : MidiReceiver() {
+                                            override fun onSend(
+                                                msg: ByteArray?,
+                                                offset: Int,
+                                                count: Int,
+                                                timestamp: Long
+                                            ) {
+                                                if (msg == null || count <= 0) return
+                                                val parsed = MidiMessageParser.parse(msg, offset, count)
+                                                for (item in parsed) {
+                                                    val event = when (item) {
+                                                        is ParsedMidiMessage.NoteOn -> MidiActivityEvent(
+                                                            sourceId = deviceKey,
+                                                            sourceName = name,
+                                                            channel = item.channel,
+                                                            noteNumber = item.note,
+                                                            velocity = item.velocity,
+                                                            isNoteOn = true
+                                                        )
+                                                        is ParsedMidiMessage.NoteOff -> MidiActivityEvent(
+                                                            sourceId = deviceKey,
+                                                            sourceName = name,
+                                                            channel = item.channel,
+                                                            noteNumber = item.note,
+                                                            velocity = item.velocity,
+                                                            isNoteOn = false
+                                                        )
+                                                        is ParsedMidiMessage.ProgramChange -> MidiActivityEvent(
+                                                            sourceId = deviceKey,
+                                                            sourceName = name,
+                                                            channel = item.channel,
+                                                            noteNumber = -1,
+                                                            velocity = 0,
+                                                            isNoteOn = false,
+                                                            programChange = item.program
+                                                        )
+                                                        is ParsedMidiMessage.ControlChange -> null
+                                                    }
+                                                    if (event != null) {
+                                                        _lastMidiActivity.value = event
+                                                        onMidiEventReceived(event)
+                                                    }
+                                                }
                                             }
-                                        }
-                                    })
+                                        })
+                                    }
+                                }
+                                if (outList.isNotEmpty()) {
+                                    openOutputPorts[info.id] = outList
                                 }
                             }
 
                             if (info.inputPortCount > 0) {
                                 val inPort = device.openInputPort(0)
                                 if (inPort != null) {
-                                    synchronized(openInputPorts) {
-                                        openInputPorts.add(inPort)
-                                    }
+                                    openInputPorts[info.id] = mutableListOf(inPort)
                                 }
                             }
                         }
-                    }, Handler(Looper.getMainLooper()))
+                    }, mainHandler)
                 }
             }
         } catch (e: Exception) {
@@ -124,9 +233,22 @@ class AndroidMidiManager(
         _connectedMidiDevices.value = list
     }
 
+    private fun closeDeviceById(deviceId: Int) {
+        pendingOpenIds.remove(deviceId)
+        openOutputPorts.remove(deviceId)?.forEach { port ->
+            try { port.close() } catch (_: Exception) {}
+        }
+        openInputPorts.remove(deviceId)?.forEach { port ->
+            try { port.close() } catch (_: Exception) {}
+        }
+        openDevices.remove(deviceId)?.let { dev ->
+            try { dev.close() } catch (_: Exception) {}
+        }
+    }
+
     /**
      * Sends Bank Select MSB (CC 0), Bank Select LSB (CC 32), and Program Change (0xC0)
-     * to switch the active patch in the connected hardware synthesizer!
+     * to switch the active patch in the connected hardware/app synthesizer.
      */
     fun sendProgramChange(channel: Int, program: Int, bankMsb: Int = 0, bankLsb: Int = 0) {
         val chan = (channel - 1).coerceIn(0, 15)
@@ -134,8 +256,8 @@ class AndroidMidiManager(
         val lsbMsg = byteArrayOf((0xB0 or chan).toByte(), 0x20.toByte(), (bankLsb and 0x7F).toByte())
         val pcMsg = byteArrayOf((0xC0 or chan).toByte(), (program and 0x7F).toByte())
 
-        synchronized(openInputPorts) {
-            for (port in openInputPorts) {
+        for (ports in openInputPorts.values) {
+            for (port in ports) {
                 try {
                     port.send(msbMsg, 0, msbMsg.size)
                     port.send(lsbMsg, 0, lsbMsg.size)
@@ -148,7 +270,7 @@ class AndroidMidiManager(
     }
 
     /**
-     * Sends MIDI Note On to connected hardware synthesizer.
+     * Sends MIDI Note On to connected hardware/virtual synthesizer input ports.
      */
     fun sendNoteOn(channel: Int, note: Int, velocity: Int = 100) {
         val chan = (channel - 1).coerceIn(0, 15)
@@ -157,8 +279,8 @@ class AndroidMidiManager(
             (note and 0x7F).toByte(),
             (velocity.coerceIn(1, 127)).toByte()
         )
-        synchronized(openInputPorts) {
-            for (port in openInputPorts) {
+        for (ports in openInputPorts.values) {
+            for (port in ports) {
                 try {
                     port.send(msg, 0, msg.size)
                 } catch (e: Exception) {
@@ -169,7 +291,7 @@ class AndroidMidiManager(
     }
 
     /**
-     * Sends MIDI Note Off to connected hardware synthesizer.
+     * Sends MIDI Note Off to connected hardware/virtual synthesizer input ports.
      */
     fun sendNoteOff(channel: Int, note: Int) {
         val chan = (channel - 1).coerceIn(0, 15)
@@ -178,8 +300,8 @@ class AndroidMidiManager(
             (note and 0x7F).toByte(),
             0x00.toByte()
         )
-        synchronized(openInputPorts) {
-            for (port in openInputPorts) {
+        for (ports in openInputPorts.values) {
+            for (port in ports) {
                 try {
                     port.send(msg, 0, msg.size)
                 } catch (e: Exception) {
@@ -190,20 +312,13 @@ class AndroidMidiManager(
     }
 
     fun release() {
+        VirtualMidiRouter.removeListener(virtualRouterListener)
         try {
             midiManager?.unregisterDeviceCallback(midiCallback)
         } catch (_: Exception) {}
-        for (port in openOutputPorts) {
-            try { port.close() } catch (_: Exception) {}
-        }
-        synchronized(openInputPorts) {
-            for (port in openInputPorts) {
-                try { port.close() } catch (_: Exception) {}
-            }
-            openInputPorts.clear()
-        }
-        for (dev in openDevices) {
-            try { dev.close() } catch (_: Exception) {}
+        val ids = openDevices.keys.toList()
+        for (id in ids) {
+            closeDeviceById(id)
         }
     }
 }

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<devices>
+    <device
+        name="MultiTrack Virtual MIDI"
+        manufacturer="MultiTrack Studio"
+        product="MultiTrack DAW">
+        <input-port name="In 1 (From Apps)" />
+        <output-port name="Out 1 (Thru)" />
+    </device>
+</devices>
