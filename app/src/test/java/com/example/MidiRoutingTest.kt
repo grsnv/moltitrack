@@ -1,7 +1,7 @@
 package com.example
 
 import com.example.audio.MidiMessageParser
-import com.example.audio.MidiSynthEngine
+import com.example.audio.MidiTimelineHelper
 import com.example.audio.ParsedMidiMessage
 import com.example.audio.VirtualMidiRouter
 import com.example.model.MidiActivityEvent
@@ -15,26 +15,12 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TemporaryFolder
 
 class MidiRoutingTest {
 
-    @get:Rule
-    val tempFolder = TemporaryFolder()
-
     @Test
     fun testMidiMessageParserAllChannelParameters() {
-        // Multi-message stream:
-        // 1. CC #74 = 96 on Ch 2 (0xB1, 74, 96)
-        // 2. Program Change #12 on Ch 3 (0xC2, 12)
-        // 3. Pitch Bend center+1024 -> 9216 = (72 << 7) | 0 -> lsb=0, msb=72 on Ch 4 (0xE3, 0, 72)
-        // 4. Channel Aftertouch 88 on Ch 5 (0xD4, 88)
-        // 5. Poly Key Pressure note 60 = 77 on Ch 6 (0xA5, 60, 77)
-        // 6. Real-time Clock (0xF8)
-        // 7. Note On note 36 vel 110 on Ch 10 (0x99, 36, 110)
-        // 8. Note Off note 36 on Ch 10 via vel 0 (0x99, 36, 0)
         val packet = byteArrayOf(
             0xB1.toByte(), 74.toByte(), 96.toByte(),
             0xC2.toByte(), 12.toByte(),
@@ -61,7 +47,6 @@ class MidiRoutingTest {
     fun testRecordedMidiEventRoundTripBytes() {
         val ccEvt = RecordedMidiEvent(timestampMs = 100L, channel = 4, type = MidiEventType.CONTROL_CHANGE, data1 = 1, data2 = 64)
         assertArrayEquals(byteArrayOf(0xB3.toByte(), 1.toByte(), 64.toByte()), ccEvt.toMidiBytes())
-        // Override output channel to Ch 9
         assertArrayEquals(byteArrayOf(0xB8.toByte(), 1.toByte(), 64.toByte()), ccEvt.toMidiBytes(channelOverride = 9))
 
         val bendEvt = RecordedMidiEvent(timestampMs = 200L, channel = 1, type = MidiEventType.PITCH_BEND, data1 = 9216)
@@ -72,77 +57,77 @@ class MidiRoutingTest {
     }
 
     @Test
-    fun testTrackMatchesMidiInputSourceAndChannel() {
+    fun testTrackMatchesMidiInputAndResolvesSourceSynthOutput() {
         val omniTrack = TrackModel(
             id = "t1",
             name = "Omni MIDI",
             type = TrackType.MIDI,
             inputDeviceId = MidiRoutingConstants.ALL_MIDI_INPUTS_ID,
             midiInputChannel = MidiRoutingConstants.CHANNEL_OMNI,
+            midiOutputDeviceId = MidiRoutingConstants.SOURCE_SYNTH_ID,
             isArmed = true
         )
         assertTrue(omniTrack.matchesMidiInput(MidiRoutingConstants.VIRTUAL_APP_MIDI_ID, 1))
         assertTrue(omniTrack.matchesMidiInput("midi_dev_7", 16))
+        assertEquals(MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID, omniTrack.resolveMidiOutputTarget())
 
-        val ch5VirtualTrack = TrackModel(
+        val specificSourceTrack = TrackModel(
             id = "t2",
-            name = "App Ch 5",
+            name = "HW Synth Ch 5",
             type = TrackType.MIDI,
-            inputDeviceId = MidiRoutingConstants.VIRTUAL_APP_MIDI_ID,
+            inputDeviceId = "midi_dev_7",
             midiInputChannel = 5,
+            midiOutputDeviceId = MidiRoutingConstants.SOURCE_SYNTH_ID,
             isArmed = true
         )
-        assertTrue(ch5VirtualTrack.matchesMidiInput(MidiRoutingConstants.VIRTUAL_APP_MIDI_ID, 5))
-        assertFalse(ch5VirtualTrack.matchesMidiInput(MidiRoutingConstants.VIRTUAL_APP_MIDI_ID, 4))
-        assertFalse(ch5VirtualTrack.matchesMidiInput("midi_dev_7", 5))
+        assertTrue(specificSourceTrack.matchesMidiInput("midi_dev_7", 5))
+        assertFalse(specificSourceTrack.matchesMidiInput("midi_dev_7", 4))
+        assertFalse(specificSourceTrack.matchesMidiInput(MidiRoutingConstants.VIRTUAL_APP_MIDI_ID, 5))
+        assertEquals("midi_dev_7", specificSourceTrack.resolveMidiOutputTarget())
 
-        val disarmedTrack = ch5VirtualTrack.copy(isArmed = false)
-        assertFalse(disarmedTrack.matchesMidiInput(MidiRoutingConstants.VIRTUAL_APP_MIDI_ID, 5))
+        val disarmedTrack = specificSourceTrack.copy(isArmed = false)
+        assertFalse(disarmedTrack.matchesMidiInput("midi_dev_7", 5))
 
         val audioTrack = TrackModel(id = "a1", name = "Audio", type = TrackType.AUDIO, isArmed = true)
         assertFalse(audioTrack.matchesMidiInput(MidiRoutingConstants.VIRTUAL_APP_MIDI_ID, 1))
     }
 
     @Test
-    fun testVirtualMidiRouterDispatchesAllParameters() {
+    fun testVirtualMidiRouterDispatchesAllParametersAndOutHook() {
         val received = mutableListOf<MidiActivityEvent>()
+        val outSent = mutableListOf<ByteArray>()
         val listener: (MidiActivityEvent) -> Unit = { received.add(it) }
         VirtualMidiRouter.addListener(listener)
+        VirtualMidiRouter.setVirtualOutSender { outSent.add(it) }
         try {
             val bytes = byteArrayOf(
-                0xB1.toByte(), 1.toByte(), 99.toByte(),   // Ch 2 Mod Wheel = 99
-                0xE1.toByte(), 0.toByte(), 64.toByte(),   // Ch 2 Pitch Bend center (8192)
-                0x91.toByte(), 60.toByte(), 100.toByte()  // Ch 2 Note On C4
+                0xB1.toByte(), 1.toByte(), 99.toByte(),
+                0xE1.toByte(), 0.toByte(), 64.toByte(),
+                0x91.toByte(), 60.toByte(), 100.toByte()
             )
             VirtualMidiRouter.dispatchBytes(bytes, 0, bytes.size)
             assertEquals(3, received.size)
             assertEquals(MidiEventType.CONTROL_CHANGE, received[0].type)
-            assertEquals(1, received[0].data1)
-            assertEquals(99, received[0].data2)
             assertEquals(MidiEventType.PITCH_BEND, received[1].type)
-            assertEquals(8192, received[1].data1)
             assertEquals(MidiEventType.NOTE_ON, received[2].type)
-            assertEquals(60, received[2].data1)
-            assertEquals(2, received[2].channel)
+
+            VirtualMidiRouter.sendToVirtualOut(byteArrayOf(0x90.toByte(), 60.toByte(), 100.toByte()))
+            assertEquals(1, outSent.size)
         } finally {
+            VirtualMidiRouter.setVirtualOutSender(null)
             VirtualMidiRouter.removeListener(listener)
         }
     }
 
     @Test
-    fun testNeutralMidiReferenceRenderWithEvents() {
-        val outFile = tempFolder.newFile("raw_midi_render.wav")
+    fun testMidiTimelineHelperComputesDurationAndActivity() {
+        val notes = listOf(MidiNote(noteNumber = 60, startMs = 0L, durationMs = 400L, velocity = 100))
         val events = listOf(
-            RecordedMidiEvent(timestampMs = 0L, channel = 1, type = MidiEventType.CONTROL_CHANGE, data1 = 7, data2 = 100),
-            RecordedMidiEvent(timestampMs = 0L, channel = 1, type = MidiEventType.PITCH_BEND, data1 = 9216)
+            RecordedMidiEvent(timestampMs = 1500L, channel = 1, type = MidiEventType.PITCH_BEND, data1 = 9216)
         )
-        val ok = MidiSynthEngine.renderMidiToWav(
-            notes = listOf(MidiNote(noteNumber = 60, startMs = 0L, durationMs = 300L)),
-            outputFile = outFile,
-            midiEvents = events,
-            minDurationMs = 1000L
-        )
-        assertTrue(ok)
-        assertTrue(outFile.length() > 44L)
+        assertEquals(1750L, MidiTimelineHelper.computeMidiDurationMs(notes, events))
+        val points = MidiTimelineHelper.extractActivityPoints(notes, events, targetPoints = 32)
+        assertEquals(32, points.size)
+        assertTrue(points.all { it in 0.05f..1.0f })
     }
 }

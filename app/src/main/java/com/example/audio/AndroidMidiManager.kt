@@ -234,16 +234,42 @@ class AndroidMidiManager(
     fun sendRawMidiBytes(targetDeviceKey: String, bytes: ByteArray) {
         if (bytes.isEmpty() || targetDeviceKey == MidiRoutingConstants.NO_MIDI_OUTPUT_ID) return
 
-        val portsToSend: List<MidiInputPort> = when (targetDeviceKey) {
-            MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID, "" -> openInputPorts.values.flatten()
-            else -> openInputPortsByKey[targetDeviceKey].orEmpty()
-        }
-
-        for (port in portsToSend) {
-            try {
-                port.send(bytes, 0, bytes.size)
-            } catch (e: Exception) {
-                e.printStackTrace()
+        when (targetDeviceKey) {
+            MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID, "" -> {
+                VirtualMidiRouter.sendToVirtualOut(bytes)
+                for (ports in openInputPorts.values) {
+                    for (port in ports) {
+                        try {
+                            port.send(bytes, 0, bytes.size)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+            }
+            MidiRoutingConstants.VIRTUAL_APP_MIDI_ID -> {
+                VirtualMidiRouter.sendToVirtualOut(bytes)
+                val virtualKeys = _connectedMidiDevices.value
+                    .filter { it.isVirtual && it.inputPortCount > 0 }
+                    .map { it.deviceKey }
+                for (key in virtualKeys) {
+                    for (port in openInputPortsByKey[key].orEmpty()) {
+                        try {
+                            port.send(bytes, 0, bytes.size)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+            }
+            else -> {
+                for (port in openInputPortsByKey[targetDeviceKey].orEmpty()) {
+                    try {
+                        port.send(bytes, 0, bytes.size)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
             }
         }
     }
@@ -254,6 +280,23 @@ class AndroidMidiManager(
         event: RecordedMidiEvent
     ) {
         sendRawMidiBytes(targetDeviceKey, event.toMidiBytes(outputChannelOverride))
+    }
+
+    fun sendAllNotesOff(targetDeviceKey: String, outputChannelOverride: Int) {
+        if (targetDeviceKey == MidiRoutingConstants.NO_MIDI_OUTPUT_ID) return
+        val channels = if (outputChannelOverride in 1..16) {
+            listOf(outputChannelOverride)
+        } else {
+            (1..16).toList()
+        }
+        for (ch in channels) {
+            val chNibble = (ch - 1).coerceIn(0, 15)
+            // CC 123 (All Notes Off) = 0
+            sendRawMidiBytes(
+                targetDeviceKey,
+                byteArrayOf((0xB0 or chNibble).toByte(), 123.toByte(), 0.toByte())
+            )
+        }
     }
 
     fun sendNoteOn(

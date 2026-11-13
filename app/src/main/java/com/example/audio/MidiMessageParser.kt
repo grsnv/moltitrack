@@ -14,7 +14,7 @@ sealed class ParsedMidiMessage {
 
 object MidiCcNames {
     fun labelFor(cc: Int): String = when (cc) {
-        0 -> "Bank Select MSB"
+        0 -> "CC #0"
         1 -> "Mod Wheel"
         2 -> "Breath"
         4 -> "Foot Ctrl"
@@ -23,7 +23,7 @@ object MidiCcNames {
         8 -> "Balance"
         10 -> "Pan"
         11 -> "Expression"
-        32 -> "Bank Select LSB"
+        32 -> "CC #32"
         64 -> "Sustain Pedal"
         65 -> "Portamento"
         66 -> "Sostenuto"

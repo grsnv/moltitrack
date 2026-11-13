@@ -5,7 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioExporter
 import com.example.audio.AudioInputManager
-import com.example.audio.MidiSynthEngine
+import com.example.audio.MidiTimelineHelper
 import com.example.audio.MultiTrackPlayerEngine
 import com.example.audio.MultiTrackRecorderEngine
 import com.example.audio.UsbAudioInterfaceManager
@@ -72,7 +72,6 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
     private val _userMessage = MutableStateFlow<String?>(null)
     val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
 
-    // Tracks open Note On IDs while recording so Note Off sets accurate note duration: (trackId, channel, noteNumber) -> noteId
     private val activeRecordingNotes = ConcurrentHashMap<Triple<String, Int, Int>, String>()
 
     val trackMeters: StateFlow<Map<String, Float>> = combine(
@@ -157,7 +156,6 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun onRecordingComplete(recordedFiles: Map<String, File>) {
         viewModelScope.launch(Dispatchers.IO) {
-            val sessionDir = File(getApplication<Application>().filesDir, "sessions/${_currentSession.value.id}").apply { mkdirs() }
             val updatedTracks = _currentSession.value.tracks.map { track ->
                 val audioFile = recordedFiles[track.id]
                 if (audioFile != null && audioFile.exists()) {
@@ -169,17 +167,11 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                         durationMs = duration
                     )
                 } else if (track.type == TrackType.MIDI && track.isArmed) {
-                    val midiFile = track.audioFilePath?.let { File(it) } ?: File(sessionDir, "midi_${track.id}.wav")
-                    MidiSynthEngine.renderMidiToWav(
-                        notes = track.midiNotes,
-                        outputFile = midiFile,
-                        midiEvents = track.midiEvents
-                    )
-                    val waveform = WavHelper.extractWaveform(midiFile)
-                    val duration = (max(0L, midiFile.length() - 44) * 1000L) / (44100 * 2)
+                    val activity = MidiTimelineHelper.extractActivityPoints(track.midiNotes, track.midiEvents)
+                    val duration = MidiTimelineHelper.computeMidiDurationMs(track.midiNotes, track.midiEvents)
                     track.copy(
-                        audioFilePath = midiFile.absolutePath,
-                        waveformPoints = waveform,
+                        audioFilePath = null,
+                        waveformPoints = activity,
                         durationMs = duration
                     )
                 } else {
@@ -204,19 +196,38 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         } else {
             val tracks = _currentSession.value.tracks
             val hasContent = tracks.any {
-                it.audioFilePath != null || it.midiEvents.isNotEmpty() || it.midiNotes.isNotEmpty()
+                (it.type == TrackType.AUDIO && it.audioFilePath != null) ||
+                    it.midiEvents.isNotEmpty() ||
+                    it.midiNotes.isNotEmpty()
             }
             if (!hasContent) {
                 _userMessage.value = "No audio or MIDI recorded yet. Tap Record or load Demo Session!"
                 return
             }
-            playerEngine.play(tracks, playheadPositionMs.value) { track, event ->
-                midiManager.sendRecordedMidiEvent(
-                    targetDeviceKey = track.midiOutputDeviceId,
-                    outputChannelOverride = track.midiChannel,
-                    event = event
-                )
-            }
+            playerEngine.play(
+                tracks = tracks,
+                startPositionMs = playheadPositionMs.value,
+                onMidiEventReplay = { track, event ->
+                    midiManager.sendRecordedMidiEvent(
+                        targetDeviceKey = track.resolveMidiOutputTarget(),
+                        outputChannelOverride = track.midiChannel,
+                        event = event
+                    )
+                },
+                onPlaybackStopped = {
+                    sendAllNotesOffForSession()
+                }
+            )
+        }
+    }
+
+    private fun sendAllNotesOffForSession() {
+        val midiTracks = _currentSession.value.tracks.filter { it.type == TrackType.MIDI }
+        for (track in midiTracks) {
+            midiManager.sendAllNotesOff(
+                targetDeviceKey = track.resolveMidiOutputTarget(),
+                outputChannelOverride = track.midiChannel
+            )
         }
     }
 
@@ -257,8 +268,6 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         val currentTracks = _currentSession.value.tracks
         val nextIndex = currentTracks.size
         val color = TrackColors[nextIndex % TrackColors.size]
-        val sessionDir = File(getApplication<Application>().filesDir, "sessions/${_currentSession.value.id}").apply { mkdirs() }
-        val midiFile = File(sessionDir, "midi_${System.currentTimeMillis()}.wav")
 
         val newTrack = TrackModel(
             id = UUID.randomUUID().toString(),
@@ -267,17 +276,16 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             colorHex = color.value.toLong(),
             inputDeviceId = MidiRoutingConstants.ALL_MIDI_INPUTS_ID,
             midiInputChannel = MidiRoutingConstants.CHANNEL_OMNI,
-            midiOutputDeviceId = MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID,
+            midiOutputDeviceId = MidiRoutingConstants.SOURCE_SYNTH_ID,
             midiChannel = MidiRoutingConstants.CHANNEL_OMNI,
             isArmed = true,
-            audioFilePath = midiFile.absolutePath
+            audioFilePath = null
         )
-        MidiSynthEngine.renderMidiToWav(emptyList(), midiFile)
 
         _currentSession.value = _currentSession.value.copy(
             tracks = currentTracks + newTrack
         )
-        _userMessage.value = "Added raw MIDI Track: ${newTrack.name}. Ready to record all MIDI parameters!"
+        _userMessage.value = "Added MIDI Track: ${newTrack.name} (plays through MIDI source synth engine)"
     }
 
     fun addMidiNoteToTrack(trackId: String, note: MidiNote) {
@@ -299,14 +307,14 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             data2 = 0
         )
         val newEvents = target.midiEvents + noteOnEvt + noteOffEvt
-        renderMidiTrackInternal(target, newNotes, newEvents)
+        updateMidiTimeline(target.id, newNotes, newEvents)
     }
 
     fun removeMidiNoteFromTrack(trackId: String, noteId: String) {
         val currentTracks = _currentSession.value.tracks
         val target = currentTracks.firstOrNull { it.id == trackId } ?: return
         val newNotes = target.midiNotes.filter { it.id != noteId }
-        renderMidiTrackInternal(target, newNotes, target.midiEvents)
+        updateMidiTimeline(target.id, newNotes, target.midiEvents)
     }
 
     fun clearMidiNotes(trackId: String) {
@@ -316,6 +324,8 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         val clearedTrack = target.copy(
             midiNotes = emptyList(),
             midiEvents = emptyList(),
+            waveformPoints = emptyList(),
+            durationMs = 0L,
             latestCcValues = emptyMap(),
             latestProgram = null,
             latestPitchBend = 8192,
@@ -324,64 +334,46 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         _currentSession.value = _currentSession.value.copy(
             tracks = currentTracks.map { if (it.id == trackId) clearedTrack else it }
         )
-        renderMidiTrackInternal(clearedTrack, emptyList(), emptyList())
         _userMessage.value = "Cleared all recorded MIDI notes & parameters"
     }
 
-    private fun renderMidiTrackInternal(
-        track: TrackModel,
+    private fun updateMidiTimeline(
+        trackId: String,
         notes: List<MidiNote>,
         events: List<RecordedMidiEvent>
     ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val sessionDir = File(getApplication<Application>().filesDir, "sessions/${_currentSession.value.id}").apply { mkdirs() }
-            val file = track.audioFilePath?.let { File(it) } ?: File(sessionDir, "midi_${track.id}.wav")
-
-            MidiSynthEngine.renderMidiToWav(
-                notes = notes,
-                outputFile = file,
-                midiEvents = events
-            )
-            val waveform = WavHelper.extractWaveform(file)
-            val duration = (max(0L, file.length() - 44) * 1000L) / (44100 * 2)
-
-            _currentSession.value = _currentSession.value.copy(
-                tracks = _currentSession.value.tracks.map {
-                    if (it.id == track.id) {
-                        it.copy(
-                            audioFilePath = file.absolutePath,
-                            midiNotes = notes,
-                            midiEvents = events,
-                            waveformPoints = waveform,
-                            durationMs = duration
-                        )
-                    } else it
-                }
-            )
-        }
+        val activity = MidiTimelineHelper.extractActivityPoints(notes, events)
+        val duration = MidiTimelineHelper.computeMidiDurationMs(notes, events)
+        _currentSession.value = _currentSession.value.copy(
+            tracks = _currentSession.value.tracks.map {
+                if (it.id == trackId) {
+                    it.copy(
+                        audioFilePath = null,
+                        midiNotes = notes,
+                        midiEvents = events,
+                        waveformPoints = activity,
+                        durationMs = duration
+                    )
+                } else it
+            }
+        )
     }
 
     fun auditionMidiNote(track: TrackModel, noteNumber: Int, velocity: Int = 100) {
         val outChannel = if (track.midiChannel in 1..16) track.midiChannel else 1
+        val outTarget = track.resolveMidiOutputTarget()
         midiManager.sendNoteOn(
             channel = outChannel,
             note = noteNumber,
             velocity = velocity,
-            targetDeviceKey = track.midiOutputDeviceId
-        )
-        MidiSynthEngine.playNoteLive(
-            noteNumber = noteNumber,
-            velocity = velocity,
-            scope = viewModelScope,
-            durationMs = 380L,
-            pitchBend14Bit = track.latestPitchBend
+            targetDeviceKey = outTarget
         )
         viewModelScope.launch {
             delay(350)
             midiManager.sendNoteOff(
                 channel = outChannel,
                 note = noteNumber,
-                targetDeviceKey = track.midiOutputDeviceId
+                targetDeviceKey = outTarget
             )
         }
     }
@@ -400,7 +392,6 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         val updatedTracks = currentTracks.map { track ->
             if (track.id !in matchedIds) return@map track
 
-            // Update live incoming parameter state regardless of recording status
             var nextCcs = track.latestCcValues
             var nextProg = track.latestProgram
             var nextBend = track.latestPitchBend
@@ -422,24 +413,15 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 else -> {}
             }
 
-            // MIDI Thru to output port if configured (avoid echoing directly back to same external device)
-            if (track.midiOutputDeviceId != MidiRoutingConstants.NO_MIDI_OUTPUT_ID &&
-                track.midiOutputDeviceId != event.sourceId
+            // Forward MIDI Thru to a different target synth engine (avoids echoing back to the exact same sender while playing live)
+            val resolvedTarget = track.resolveMidiOutputTarget()
+            if (resolvedTarget != MidiRoutingConstants.NO_MIDI_OUTPUT_ID &&
+                resolvedTarget != event.sourceId
             ) {
                 midiManager.sendRecordedMidiEvent(
-                    targetDeviceKey = track.midiOutputDeviceId,
+                    targetDeviceKey = resolvedTarget,
                     outputChannelOverride = track.midiChannel,
                     event = event.toRecordedEvent(0L)
-                )
-            }
-
-            // Audition live reference monitor tone on Note On
-            if (event.type == MidiEventType.NOTE_ON) {
-                MidiSynthEngine.playNoteLive(
-                    noteNumber = event.data1,
-                    velocity = event.data2,
-                    scope = viewModelScope,
-                    pitchBend14Bit = nextBend
                 )
             }
 
@@ -485,6 +467,8 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 track.copy(
                     midiNotes = updatedNotes,
                     midiEvents = updatedEvents,
+                    waveformPoints = MidiTimelineHelper.extractActivityPoints(updatedNotes, updatedEvents),
+                    durationMs = MidiTimelineHelper.computeMidiDurationMs(updatedNotes, updatedEvents),
                     latestCcValues = nextCcs,
                     latestProgram = nextProg,
                     latestPitchBend = nextBend,
@@ -624,7 +608,6 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             val demoDir = File(getApplication<Application>().filesDir, "demo_session").apply { mkdirs() }
             val track1File = File(demoDir, "demo_track_1_drums.wav")
             val track2File = File(demoDir, "demo_track_2_bass.wav")
-            val track3File = File(demoDir, "demo_track_3_midi.wav")
 
             WavHelper.createSyntheticTrack(track1File, 120f, 10, "DRUM_PULSE")
             WavHelper.createSyntheticTrack(track2File, 110f, 10, "TRIANGLE")
@@ -678,12 +661,6 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 RecordedMidiEvent(timestampMs = 2800L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 72, data2 = 0),
                 RecordedMidiEvent(timestampMs = 2900L, channel = 1, type = MidiEventType.CONTROL_CHANGE, data1 = 64, data2 = 0)
             )
-            MidiSynthEngine.renderMidiToWav(
-                notes = demoMidiNotes,
-                outputFile = track3File,
-                midiEvents = demoMidiEvents,
-                minDurationMs = 10000L
-            )
 
             val t3 = TrackModel(
                 id = UUID.randomUUID().toString(),
@@ -692,16 +669,16 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 colorHex = TrackColors[2].value.toLong(),
                 inputDeviceId = MidiRoutingConstants.ALL_MIDI_INPUTS_ID,
                 midiInputChannel = MidiRoutingConstants.CHANNEL_OMNI,
-                midiOutputDeviceId = MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID,
+                midiOutputDeviceId = MidiRoutingConstants.SOURCE_SYNTH_ID,
                 midiChannel = MidiRoutingConstants.CHANNEL_OMNI,
                 midiNotes = demoMidiNotes,
                 midiEvents = demoMidiEvents,
                 latestCcValues = mapOf(1 to 42, 64 to 0),
                 volume = 0.9f,
                 pan = 0.0f,
-                audioFilePath = track3File.absolutePath,
-                waveformPoints = WavHelper.extractWaveform(track3File),
-                durationMs = 10000L
+                audioFilePath = null,
+                waveformPoints = MidiTimelineHelper.extractActivityPoints(demoMidiNotes, demoMidiEvents),
+                durationMs = MidiTimelineHelper.computeMidiDurationMs(demoMidiNotes, demoMidiEvents)
             )
 
             _currentSession.value = RecordingSession(
@@ -710,7 +687,7 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 tracks = listOf(t1, t2, t3),
                 durationMs = 10000L
             )
-            _userMessage.value = "Loaded Demo Session! Track 3 contains raw MIDI Notes + CC/Pitch Bend parameters."
+            _userMessage.value = "Loaded Demo Session! Track 3 replays raw MIDI directly to your MIDI source synth engine."
         }
     }
 
@@ -721,7 +698,7 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             _currentSession.value.title
         )
         if (!success) {
-            _userMessage.value = "Failed to export master mix. Ensure tracks have recorded audio."
+            _userMessage.value = "Failed to export master mix. Ensure audio tracks have recorded audio."
         }
     }
 
@@ -732,7 +709,7 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             _currentSession.value.title
         )
         if (!success) {
-            _userMessage.value = "Failed to export stems. Ensure tracks have recorded audio."
+            _userMessage.value = "Failed to export stems. Ensure audio tracks have recorded audio."
         }
     }
 

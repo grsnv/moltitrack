@@ -133,6 +133,7 @@ object MidiRoutingConstants {
     const val ALL_MIDI_INPUTS_ID = "all_midi"
     const val VIRTUAL_APP_MIDI_ID = "virtual_app_midi"
     const val LEGACY_USB_MIDI_ID = "usb_midi"
+    const val SOURCE_SYNTH_ID = "source_synth" // Route playback/keys directly to the selected MIDI source's synth engine
     const val ALL_MIDI_OUTPUTS_ID = "all_midi_out"
     const val NO_MIDI_OUTPUT_ID = "none_midi_out"
     const val CHANNEL_OMNI = 0 // 0 = All / Preserve Original MIDI Channels (1..16)
@@ -185,7 +186,7 @@ data class TrackModel(
     val midiNotes: List<MidiNote> = emptyList(),
     val midiEvents: List<RecordedMidiEvent> = emptyList(),
     val midiInputChannel: Int = MidiRoutingConstants.CHANNEL_OMNI, // 0 = Omni (All), 1..16 = specific input channel
-    val midiOutputDeviceId: String = MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID,
+    val midiOutputDeviceId: String = MidiRoutingConstants.SOURCE_SYNTH_ID,
     val midiChannel: Int = MidiRoutingConstants.CHANNEL_OMNI, // 0 = Preserve Input Ch, 1..16 = Force Output Ch
     val latestCcValues: Map<Int, Int> = emptyMap(),
     val latestProgram: Int? = null,
@@ -199,6 +200,21 @@ data class TrackModel(
 
     val midiOutputChannelLabel: String
         get() = if (midiChannel == MidiRoutingConstants.CHANNEL_OMNI) "Orig Ch" else "Ch $midiChannel"
+
+    fun resolveMidiOutputTarget(): String {
+        return when (midiOutputDeviceId) {
+            MidiRoutingConstants.SOURCE_SYNTH_ID -> {
+                when (inputDeviceId) {
+                    MidiRoutingConstants.ALL_MIDI_INPUTS_ID,
+                    MidiRoutingConstants.LEGACY_USB_MIDI_ID,
+                    "",
+                    "default_mic" -> MidiRoutingConstants.ALL_MIDI_OUTPUTS_ID
+                    else -> inputDeviceId
+                }
+            }
+            else -> midiOutputDeviceId
+        }
+    }
 
     fun matchesMidiInput(sourceId: String, channel: Int): Boolean {
         if (type != TrackType.MIDI || !isArmed) return false

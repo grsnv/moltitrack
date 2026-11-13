@@ -216,6 +216,12 @@ fun TrackLaneCard(
                                 else -> connectedMidiDevices.firstOrNull { it.deviceKey == track.inputDeviceId }?.name ?: "MIDI Port"
                             }
                             val chLabel = if (track.midiInputChannel == 0) "Omni" else "Ch ${track.midiInputChannel}"
+                            val outTargetLabel = when (track.midiOutputDeviceId) {
+                                MidiRoutingConstants.SOURCE_SYNTH_ID -> "Source Synth"
+                                MidiRoutingConstants.NO_MIDI_OUTPUT_ID -> "Off"
+                                MidiRoutingConstants.VIRTUAL_APP_MIDI_ID -> "App Out"
+                                else -> track.midiOutputChannelLabel
+                            }
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
@@ -233,7 +239,7 @@ fun TrackLaneCard(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "In: $sourceLabel ($chLabel) • Out: ${track.midiOutputChannelLabel}",
+                                    text = "In: $sourceLabel ($chLabel) • Out: $outTargetLabel",
                                     color = StudioCyan,
                                     fontSize = 10.sp,
                                     fontFamily = FontFamily.Monospace,

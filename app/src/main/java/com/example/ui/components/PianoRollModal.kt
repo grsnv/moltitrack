@@ -188,9 +188,9 @@ fun PianoRollModal(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         val midiStatus = if (connectedMidiDevices.isNotEmpty()) {
-                            "MIDI Active: ${connectedMidiDevices.first().name} + Virtual Port"
+                            "Source Synth Active: ${connectedMidiDevices.first().name} + Virtual Port"
                         } else {
-                            "Raw MIDI Recorder • Captures Notes, CCs, Pitch Bend, PC & Aftertouch"
+                            "Plays sound via MIDI Source Synth Engine • Tap to configure routing"
                         }
                         Text(
                             text = midiStatus,

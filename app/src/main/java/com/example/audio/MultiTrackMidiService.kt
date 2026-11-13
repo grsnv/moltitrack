@@ -26,6 +26,21 @@ object VirtualMidiRouter {
     private val _connectedExternalSenders = MutableStateFlow(0)
     val connectedExternalSenders: StateFlow<Int> = _connectedExternalSenders.asStateFlow()
 
+    @Volatile
+    private var virtualOutSender: ((ByteArray) -> Unit)? = null
+
+    fun setVirtualOutSender(sender: ((ByteArray) -> Unit)?) {
+        virtualOutSender = sender
+    }
+
+    fun sendToVirtualOut(bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        try {
+            virtualOutSender?.invoke(bytes)
+        } catch (_: Exception) {
+        }
+    }
+
     fun addListener(listener: (MidiActivityEvent) -> Unit) {
         listeners.add(listener)
     }
@@ -118,9 +133,8 @@ fun ParsedMidiMessage.toMidiActivityEvent(sourceId: String, sourceName: String):
 }
 
 /**
- * Android MidiDeviceService allowing other MIDI apps (sequencers, controllers, arpeggiators)
- * to discover "MultiTrack Virtual MIDI" and route MIDI channels, notes, CCs, pitch bend,
- * aftertouch, and program changes directly into MultiTrack tracks.
+ * Android MidiDeviceService allowing other MIDI apps (sequencers, controllers, arpeggiators, synths)
+ * to route MIDI into MultiTrack and receive playback/thru MIDI out to external synth engines.
  */
 class MultiTrackMidiService : MidiDeviceService() {
 
@@ -148,6 +162,13 @@ class MultiTrackMidiService : MidiDeviceService() {
     override fun onCreate() {
         super.onCreate()
         VirtualMidiRouter.updateServiceStatus(bound = true)
+        VirtualMidiRouter.setVirtualOutSender { bytes ->
+            for (outReceiver in outputPortReceivers) {
+                try {
+                    outReceiver?.send(bytes, 0, bytes.size)
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     override fun onGetInputPortReceivers(): Array<MidiReceiver> {
@@ -163,6 +184,7 @@ class MultiTrackMidiService : MidiDeviceService() {
     }
 
     override fun onDestroy() {
+        VirtualMidiRouter.setVirtualOutSender(null)
         VirtualMidiRouter.updateServiceStatus(bound = false, inputOpenCount = 0)
         super.onDestroy()
     }

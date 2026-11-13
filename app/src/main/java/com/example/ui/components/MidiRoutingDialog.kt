@@ -391,24 +391,46 @@ fun MidiRoutingDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // SECTION 3: MIDI OUTPUT / THRU DESTINATION (REPLAY RECORDED PARAMETERS)
+                // SECTION 3: MIDI OUTPUT / SOURCE SYNTH ENGINE
                 Text(
-                    text = "MIDI OUTPUT / THRU DESTINATION",
+                    text = "MIDI OUTPUT / SYNTH ENGINE",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
                     color = StudioTextMuted
                 )
                 Text(
-                    text = "Forward live & recorded MIDI parameters (Notes, CCs, Pitch Bend, PC, Aftertouch) out to:",
+                    text = "Play sound directly from your MIDI source synth engine or route recorded parameters to:",
                     fontSize = 10.sp,
                     color = StudioTextSecondary,
                     modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
                 )
 
                 MidiSourceCard(
-                    title = "All Connected MIDI Outputs",
-                    subtitle = "Send live Thru & playback parameters to connected USB/BLE/App MIDI inputs",
+                    title = "MIDI Source Synth Engine (Default)",
+                    subtitle = "Play sound directly through the selected MIDI input source's own synth engine",
+                    badge = "SOURCE",
+                    badgeColor = StudioGreen,
+                    icon = Icons.Default.SwapHoriz,
+                    isSelected = selectedOutputId == MidiRoutingConstants.SOURCE_SYNTH_ID,
+                    testTag = "midi_out_source",
+                    onClick = { selectedOutputId = MidiRoutingConstants.SOURCE_SYNTH_ID }
+                )
+
+                MidiSourceCard(
+                    title = "MultiTrack Virtual MIDI Out (To Synth Apps)",
+                    subtitle = "Send playback & keys to external Android synth apps connected to MultiTrack",
+                    badge = "APP OUT",
+                    badgeColor = StudioGreen,
+                    icon = Icons.Default.Piano,
+                    isSelected = selectedOutputId == MidiRoutingConstants.VIRTUAL_APP_MIDI_ID,
+                    testTag = "midi_out_virtual_app",
+                    onClick = { selectedOutputId = MidiRoutingConstants.VIRTUAL_APP_MIDI_ID }
+                )
+
+                MidiSourceCard(
+                    title = "All Connected MIDI Synth Engines",
+                    subtitle = "Broadcast playback & live keys to all connected USB, BLE, and App MIDI synths",
                     badge = "ALL OUT",
                     badgeColor = StudioCyan,
                     icon = Icons.Default.SwapHoriz,
@@ -419,7 +441,7 @@ fun MidiRoutingDialog(
 
                 MidiSourceCard(
                     title = "Monitor Only (No External MIDI Out)",
-                    subtitle = "Record & inspect parameters locally without sending MIDI Out",
+                    subtitle = "Record & inspect parameters without sending MIDI Out",
                     badge = "OFF",
                     badgeColor = StudioTextMuted,
                     icon = Icons.Default.SettingsInputComponent,
