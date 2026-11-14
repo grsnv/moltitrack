@@ -62,6 +62,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audio.UsbMidiDeviceItem
+import com.example.model.AudioInputConstants
 import com.example.model.AudioInputDevice
 import com.example.model.MidiRoutingConstants
 import com.example.model.TrackModel
@@ -259,17 +260,18 @@ fun TrackLaneCard(
                                 .padding(horizontal = 6.dp, vertical = 2.dp)
                                 .testTag("routing_chip_${track.id}")
                         ) {
+                            val isSystemAudio = track.inputDeviceId == AudioInputConstants.SYSTEM_AUDIO_ID
                             Icon(
-                                imageVector = Icons.Default.Mic,
+                                imageVector = if (isSystemAudio) Icons.Default.GraphicEq else Icons.Default.Mic,
                                 contentDescription = "Input Source",
-                                tint = StudioCyan,
+                                tint = if (isSystemAudio) StudioYellow else StudioCyan,
                                 modifier = Modifier.size(11.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            val devName = inputDevice?.name ?: "Input Mic"
+                            val devName = inputDevice?.name ?: if (isSystemAudio) "System Sound" else "Input Mic"
                             Text(
                                 text = "$devName • ${track.inputChannelMode.shortLabel}",
-                                color = StudioCyan,
+                                color = if (isSystemAudio) StudioYellow else StudioCyan,
                                 fontSize = 10.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Medium

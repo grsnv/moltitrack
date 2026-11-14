@@ -2,9 +2,16 @@ package com.example.audio
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.projection.MediaProjection
+import android.os.Build
+import android.os.Process
+import androidx.annotation.RequiresApi
+import com.example.model.AudioInputConstants
 import com.example.model.AudioInputDevice
 import com.example.model.InputChannelMode
 import com.example.model.TrackModel
@@ -18,6 +25,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
@@ -51,6 +59,7 @@ class MultiTrackRecorderEngine(
         tracksToRecord: List<TrackModel>,
         availableDevices: List<AudioInputDevice>,
         sessionDir: File,
+        mediaProjection: MediaProjection? = null,
         onRecordingFinished: (Map<String, File>) -> Unit
     ): Boolean {
         if (isRecording.get()) return false
@@ -67,6 +76,7 @@ class MultiTrackRecorderEngine(
             val trackFiles = mutableMapOf<String, File>()
             val trackStreams = mutableMapOf<String, FileOutputStream>()
             val trackChannels = mutableMapOf<String, Int>() // 1 for mono, 2 for stereo
+            val sharedMeters = ConcurrentHashMap<String, Float>()
 
             try {
                 // Initialize WAV files for each armed AUDIO track (MIDI tracks capture raw MIDI events directly)
@@ -83,7 +93,7 @@ class MultiTrackRecorderEngine(
                     }
                 }
 
-                // Group armed audio tracks by physical input device
+                // Group armed audio tracks by input device (hardware device or system audio playback)
                 val tracksByDevice = armedAudioTracks.groupBy { it.inputDeviceId }
                 val deviceJobs = mutableListOf<Job>()
                 val startTime = System.currentTimeMillis()
@@ -97,16 +107,28 @@ class MultiTrackRecorderEngine(
                 }
 
                 for ((devId, devTracks) in tracksByDevice) {
-                    val targetDevice = availableDevices.firstOrNull { it.id == devId }
-
-                    val job = launch {
-                        recordFromDevice(
-                            device = targetDevice,
-                            tracks = devTracks,
-                            streams = trackStreams
-                        )
+                    if (devId == AudioInputConstants.SYSTEM_AUDIO_ID) {
+                        val job = launch {
+                            recordFromSystemAudio(
+                                mediaProjection = mediaProjection,
+                                tracks = devTracks,
+                                streams = trackStreams,
+                                sharedMeters = sharedMeters
+                            )
+                        }
+                        deviceJobs.add(job)
+                    } else {
+                        val targetDevice = availableDevices.firstOrNull { it.id == devId }
+                        val job = launch {
+                            recordFromDevice(
+                                device = targetDevice,
+                                tracks = devTracks,
+                                streams = trackStreams,
+                                sharedMeters = sharedMeters
+                            )
+                        }
+                        deviceJobs.add(job)
                     }
-                    deviceJobs.add(job)
                 }
 
                 if (deviceJobs.isEmpty()) {
@@ -163,10 +185,76 @@ class MultiTrackRecorderEngine(
     }
 
     @SuppressLint("MissingPermission")
+    private fun recordFromSystemAudio(
+        mediaProjection: MediaProjection?,
+        tracks: List<TrackModel>,
+        streams: Map<String, FileOutputStream>,
+        sharedMeters: ConcurrentHashMap<String, Float>
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || mediaProjection == null) {
+            return
+        }
+
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            sampleRate,
+            channelConfig,
+            audioFormat
+        )
+        val bufferSize = max(minBufferSize * 2, 4096)
+
+        var audioRecord: AudioRecord? = null
+        try {
+            audioRecord = createSystemAudioRecord(mediaProjection, bufferSize)
+            synchronized(activeAudioRecords) {
+                activeAudioRecords.add(audioRecord)
+            }
+            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                return
+            }
+            audioRecord.startRecording()
+            processAudioRecordLoop(audioRecord, bufferSize, tracks, streams, sharedMeters)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            try {
+                audioRecord?.stop()
+                audioRecord?.release()
+            } catch (_: Exception) {}
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    @SuppressLint("MissingPermission")
+    private fun createSystemAudioRecord(
+        mediaProjection: MediaProjection,
+        bufferSize: Int
+    ): AudioRecord {
+        val captureConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+            .addMatchingUsage(AudioAttributes.USAGE_GAME)
+            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+            .excludeUid(Process.myUid())
+            .build()
+
+        val format = AudioFormat.Builder()
+            .setEncoding(audioFormat)
+            .setSampleRate(sampleRate)
+            .setChannelMask(channelConfig)
+            .build()
+
+        return AudioRecord.Builder()
+            .setAudioFormat(format)
+            .setBufferSizeInBytes(bufferSize)
+            .setAudioPlaybackCaptureConfig(captureConfig)
+            .build()
+    }
+
+    @SuppressLint("MissingPermission")
     private fun recordFromDevice(
         device: AudioInputDevice?,
         tracks: List<TrackModel>,
-        streams: Map<String, FileOutputStream>
+        streams: Map<String, FileOutputStream>,
+        sharedMeters: ConcurrentHashMap<String, Float>
     ) {
         val minBufferSize = AudioRecord.getMinBufferSize(
             sampleRate,
@@ -198,100 +286,7 @@ class MultiTrackRecorderEngine(
             }
 
             audioRecord.startRecording()
-
-            val rawBuffer = ShortArray(bufferSize / 2)
-            val trackMonoBuffers = tracks.associate { it.id to ByteArray(rawBuffer.size) }
-            val trackStereoBuffers = tracks.associate { it.id to ByteArray(rawBuffer.size * 2) }
-
-            while (isRecording.get()) {
-                val shortsRead = audioRecord.read(rawBuffer, 0, rawBuffer.size)
-                if (shortsRead <= 0) continue
-
-                // Total stereo frames read:
-                val framesRead = shortsRead / 2
-                val currentMeters = mutableMapOf<String, Float>()
-
-                for (track in tracks) {
-                    val stream = streams[track.id] ?: continue
-                    var sumSquare = 0.0
-                    var peak = 0
-
-                    when (track.inputChannelMode) {
-                        InputChannelMode.LEFT_OR_CH1 -> {
-                            val byteBuf = trackMonoBuffers[track.id] ?: continue
-                            var byteIdx = 0
-                            for (f in 0 until framesRead) {
-                                val leftSample = rawBuffer[f * 2]
-                                val absVal = abs(leftSample.toInt())
-                                if (absVal > peak) peak = absVal
-                                sumSquare += leftSample.toDouble() * leftSample
-
-                                byteBuf[byteIdx++] = (leftSample.toInt() and 0xFF).toByte()
-                                byteBuf[byteIdx++] = ((leftSample.toInt() shr 8) and 0xFF).toByte()
-                            }
-                            stream.write(byteBuf, 0, byteIdx)
-                        }
-
-                        InputChannelMode.RIGHT_OR_CH2 -> {
-                            val byteBuf = trackMonoBuffers[track.id] ?: continue
-                            var byteIdx = 0
-                            for (f in 0 until framesRead) {
-                                val rightSample = rawBuffer[f * 2 + 1]
-                                val absVal = abs(rightSample.toInt())
-                                if (absVal > peak) peak = absVal
-                                sumSquare += rightSample.toDouble() * rightSample
-
-                                byteBuf[byteIdx++] = (rightSample.toInt() and 0xFF).toByte()
-                                byteBuf[byteIdx++] = ((rightSample.toInt() shr 8) and 0xFF).toByte()
-                            }
-                            stream.write(byteBuf, 0, byteIdx)
-                        }
-
-                        InputChannelMode.MONO_SUM -> {
-                            val byteBuf = trackMonoBuffers[track.id] ?: continue
-                            var byteIdx = 0
-                            for (f in 0 until framesRead) {
-                                val left = rawBuffer[f * 2].toInt()
-                                val right = rawBuffer[f * 2 + 1].toInt()
-                                val sumSample = ((left + right) / 2).coerceIn(-32768, 32767).toShort()
-                                val absVal = abs(sumSample.toInt())
-                                if (absVal > peak) peak = absVal
-                                sumSquare += sumSample.toDouble() * sumSample
-
-                                byteBuf[byteIdx++] = (sumSample.toInt() and 0xFF).toByte()
-                                byteBuf[byteIdx++] = ((sumSample.toInt() shr 8) and 0xFF).toByte()
-                            }
-                            stream.write(byteBuf, 0, byteIdx)
-                        }
-
-                        InputChannelMode.STEREO -> {
-                            val byteBuf = trackStereoBuffers[track.id] ?: continue
-                            var byteIdx = 0
-                            for (f in 0 until framesRead) {
-                                val left = rawBuffer[f * 2]
-                                val right = rawBuffer[f * 2 + 1]
-                                val maxVal = max(abs(left.toInt()), abs(right.toInt()))
-                                if (maxVal > peak) peak = maxVal
-                                sumSquare += (left.toDouble() * left + right.toDouble() * right) / 2.0
-
-                                byteBuf[byteIdx++] = (left.toInt() and 0xFF).toByte()
-                                byteBuf[byteIdx++] = ((left.toInt() shr 8) and 0xFF).toByte()
-                                byteBuf[byteIdx++] = (right.toInt() and 0xFF).toByte()
-                                byteBuf[byteIdx++] = ((right.toInt() shr 8) and 0xFF).toByte()
-                            }
-                            stream.write(byteBuf, 0, byteIdx)
-                        }
-                    }
-
-                    // Compute normalized VU meter (0f to 1f) with perceptual curve
-                    val rms = if (framesRead > 0) sqrt(sumSquare / framesRead) else 0.0
-                    val normalized = (rms / 9000.0).toFloat().coerceIn(0f, 1f)
-                    currentMeters[track.id] = normalized
-                }
-
-                _trackMeterLevels.value = currentMeters
-            }
-
+            processAudioRecordLoop(audioRecord, bufferSize, tracks, streams, sharedMeters)
         } catch (e: Exception) {
             e.printStackTrace()
         } finally {
@@ -299,6 +294,106 @@ class MultiTrackRecorderEngine(
                 audioRecord?.stop()
                 audioRecord?.release()
             } catch (_: Exception) {}
+        }
+    }
+
+    private fun processAudioRecordLoop(
+        audioRecord: AudioRecord,
+        bufferSize: Int,
+        tracks: List<TrackModel>,
+        streams: Map<String, FileOutputStream>,
+        sharedMeters: ConcurrentHashMap<String, Float>
+    ) {
+        val rawBuffer = ShortArray(bufferSize / 2)
+        val trackMonoBuffers = tracks.associate { it.id to ByteArray(rawBuffer.size) }
+        val trackStereoBuffers = tracks.associate { it.id to ByteArray(rawBuffer.size * 2) }
+
+        while (isRecording.get()) {
+            val shortsRead = audioRecord.read(rawBuffer, 0, rawBuffer.size)
+            if (shortsRead <= 0) continue
+
+            // Total stereo frames read:
+            val framesRead = shortsRead / 2
+
+            for (track in tracks) {
+                val stream = streams[track.id] ?: continue
+                var sumSquare = 0.0
+                var peak = 0
+
+                when (track.inputChannelMode) {
+                    InputChannelMode.LEFT_OR_CH1 -> {
+                        val byteBuf = trackMonoBuffers[track.id] ?: continue
+                        var byteIdx = 0
+                        for (f in 0 until framesRead) {
+                            val leftSample = rawBuffer[f * 2]
+                            val absVal = abs(leftSample.toInt())
+                            if (absVal > peak) peak = absVal
+                            sumSquare += leftSample.toDouble() * leftSample
+
+                            byteBuf[byteIdx++] = (leftSample.toInt() and 0xFF).toByte()
+                            byteBuf[byteIdx++] = ((leftSample.toInt() shr 8) and 0xFF).toByte()
+                        }
+                        stream.write(byteBuf, 0, byteIdx)
+                    }
+
+                    InputChannelMode.RIGHT_OR_CH2 -> {
+                        val byteBuf = trackMonoBuffers[track.id] ?: continue
+                        var byteIdx = 0
+                        for (f in 0 until framesRead) {
+                            val rightSample = rawBuffer[f * 2 + 1]
+                            val absVal = abs(rightSample.toInt())
+                            if (absVal > peak) peak = absVal
+                            sumSquare += rightSample.toDouble() * rightSample
+
+                            byteBuf[byteIdx++] = (rightSample.toInt() and 0xFF).toByte()
+                            byteBuf[byteIdx++] = ((rightSample.toInt() shr 8) and 0xFF).toByte()
+                        }
+                        stream.write(byteBuf, 0, byteIdx)
+                    }
+
+                    InputChannelMode.MONO_SUM -> {
+                        val byteBuf = trackMonoBuffers[track.id] ?: continue
+                        var byteIdx = 0
+                        for (f in 0 until framesRead) {
+                            val left = rawBuffer[f * 2].toInt()
+                            val right = rawBuffer[f * 2 + 1].toInt()
+                            val sumSample = ((left + right) / 2).coerceIn(-32768, 32767).toShort()
+                            val absVal = abs(sumSample.toInt())
+                            if (absVal > peak) peak = absVal
+                            sumSquare += sumSample.toDouble() * sumSample
+
+                            byteBuf[byteIdx++] = (sumSample.toInt() and 0xFF).toByte()
+                            byteBuf[byteIdx++] = ((sumSample.toInt() shr 8) and 0xFF).toByte()
+                        }
+                        stream.write(byteBuf, 0, byteIdx)
+                    }
+
+                    InputChannelMode.STEREO -> {
+                        val byteBuf = trackStereoBuffers[track.id] ?: continue
+                        var byteIdx = 0
+                        for (f in 0 until framesRead) {
+                            val left = rawBuffer[f * 2]
+                            val right = rawBuffer[f * 2 + 1]
+                            val maxVal = max(abs(left.toInt()), abs(right.toInt()))
+                            if (maxVal > peak) peak = maxVal
+                            sumSquare += (left.toDouble() * left + right.toDouble() * right) / 2.0
+
+                            byteBuf[byteIdx++] = (left.toInt() and 0xFF).toByte()
+                            byteBuf[byteIdx++] = ((left.toInt() shr 8) and 0xFF).toByte()
+                            byteBuf[byteIdx++] = (right.toInt() and 0xFF).toByte()
+                            byteBuf[byteIdx++] = ((right.toInt() shr 8) and 0xFF).toByte()
+                        }
+                        stream.write(byteBuf, 0, byteIdx)
+                    }
+                }
+
+                // Compute normalized VU meter (0f to 1f) with perceptual curve
+                val rms = if (framesRead > 0) sqrt(sumSquare / framesRead) else 0.0
+                val normalized = (rms / 9000.0).toFloat().coerceIn(0f, 1f)
+                sharedMeters[track.id] = normalized
+            }
+
+            _trackMeterLevels.value = sharedMeters.toMap()
         }
     }
 

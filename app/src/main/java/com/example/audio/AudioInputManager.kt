@@ -5,6 +5,7 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
+import com.example.model.AudioInputConstants
 import com.example.model.AudioInputDevice
 import com.example.model.AudioInputType
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,13 +40,26 @@ class AudioInputManager(private val context: Context) {
         // Always include default input option
         list.add(
             AudioInputDevice(
-                id = "default_mic",
+                id = AudioInputConstants.DEFAULT_MIC_ID,
                 name = "Default Android Mic",
                 type = AudioInputType.DEFAULT,
                 channelCount = 2,
                 nativeDeviceInfo = null
             )
         )
+
+        // Internal System Sound capture (AudioPlaybackCapture API, Android 10+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            list.add(
+                AudioInputDevice(
+                    id = AudioInputConstants.SYSTEM_AUDIO_ID,
+                    name = "System Sound (Internal Audio)",
+                    type = AudioInputType.SYSTEM_AUDIO,
+                    channelCount = 2,
+                    nativeDeviceInfo = null
+                )
+            )
+        }
 
         try {
             val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)

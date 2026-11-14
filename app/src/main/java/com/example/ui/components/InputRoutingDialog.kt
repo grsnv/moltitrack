@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
@@ -58,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audio.AsioBufferSize
 import com.example.audio.UsbAudioDeviceInfo
+import com.example.model.AudioInputConstants
 import com.example.model.AudioInputDevice
 import com.example.model.AudioInputType
 import com.example.model.InputChannelMode
@@ -183,6 +185,7 @@ fun InputRoutingDialog(
                         availableInputs.forEach { dev ->
                             val isSelected = dev.id == selectedDevId
                             val isUsb = dev.type == AudioInputType.USB_AUDIO
+                            val isSystemAudio = dev.type == AudioInputType.SYSTEM_AUDIO
 
                             Surface(
                                 modifier = Modifier
@@ -207,12 +210,18 @@ fun InputRoutingDialog(
                                     Icon(
                                         imageVector = when (dev.type) {
                                             AudioInputType.USB_AUDIO -> Icons.Default.Usb
+                                            AudioInputType.SYSTEM_AUDIO -> Icons.Default.GraphicEq
                                             AudioInputType.WIRED_HEADSET,
                                             AudioInputType.BLUETOOTH -> Icons.Default.Headphones
                                             else -> Icons.Default.Mic
                                         },
                                         contentDescription = null,
-                                        tint = if (isUsb) StudioGreen else if (isSelected) StudioCyan else StudioTextSecondary,
+                                        tint = when {
+                                            isUsb -> StudioGreen
+                                            isSystemAudio -> StudioYellow
+                                            isSelected -> StudioCyan
+                                            else -> StudioTextSecondary
+                                        },
                                         modifier = Modifier.size(20.dp)
                                     )
                                     Spacer(modifier = Modifier.width(10.dp))
@@ -239,11 +248,27 @@ fun InputRoutingDialog(
                                                         fontWeight = FontWeight.Bold
                                                     )
                                                 }
+                                            } else if (isSystemAudio) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(3.dp))
+                                                        .background(StudioYellow.copy(alpha = 0.2f))
+                                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "INTERNAL",
+                                                        color = StudioYellow,
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
                                             }
                                         }
                                         Text(
                                             text = when (dev.type) {
                                                 AudioInputType.USB_AUDIO -> "USB Audio Class Device (Direct HW Stream)"
+                                                AudioInputType.SYSTEM_AUDIO -> "Records playback audio from other apps on this device"
                                                 AudioInputType.BUILTIN_MIC -> "On-device built-in microphone"
                                                 AudioInputType.WIRED_HEADSET -> "3.5mm TRRS external headset / mic"
                                                 AudioInputType.BLUETOOTH -> "Bluetooth SCO wireless mic"
@@ -262,6 +287,24 @@ fun InputRoutingDialog(
                                         )
                                     }
                                 }
+                            }
+                        }
+
+                        if (selectedDevId == AudioInputConstants.SYSTEM_AUDIO_ID) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = StudioYellow.copy(alpha = 0.1f),
+                                shape = RoundedCornerShape(8.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, StudioYellow.copy(alpha = 0.4f))
+                            ) {
+                                Text(
+                                    text = "When you press REC, Android will prompt to authorize internal audio capture. MultiTrack's own playback is automatically excluded to prevent feedback.",
+                                    fontSize = 11.sp,
+                                    color = StudioYellow,
+                                    lineHeight = 15.sp,
+                                    modifier = Modifier.padding(10.dp)
+                                )
                             }
                         }
                     }
@@ -348,7 +391,11 @@ fun InputRoutingDialog(
                     Spacer(modifier = Modifier.height(4.dp))
                     VuMeterBar(level = liveMeterLevel, height = 7.dp)
                     Text(
-                        text = "Speak into your input to test signal before recording",
+                        text = if (selectedDevId == AudioInputConstants.SYSTEM_AUDIO_ID) {
+                            "System audio meter activates once recording starts after Android capture permission is granted"
+                        } else {
+                            "Speak into your input to test signal before recording"
+                        },
                         fontSize = 10.sp,
                         color = StudioTextMuted,
                         modifier = Modifier.padding(top = 2.dp)

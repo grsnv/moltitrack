@@ -1,7 +1,11 @@
 package com.example
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -64,6 +68,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -98,8 +103,10 @@ import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
+import com.example.audio.SystemAudioCaptureService
 import com.example.ui.theme.StudioYellow
 import com.example.viewmodel.MultiTrackViewModel
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -117,6 +124,8 @@ class MainActivity : ComponentActivity() {
 fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
     val context = LocalContext.current
 
+    val coroutineScope = rememberCoroutineScope()
+
     // Runtime Permission State
     var hasRecordPermission by remember {
         mutableStateOf(
@@ -126,6 +135,42 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
             ) == PackageManager.PERMISSION_GRANTED
         )
     }
+    var pendingRecordAfterPermission by remember { mutableStateOf(false) }
+
+    val systemAudioLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            val dataIntent = result.data!!
+            coroutineScope.launch {
+                val projection = SystemAudioCaptureService.acquireProjection(
+                    context = context,
+                    resultCode = result.resultCode,
+                    data = dataIntent
+                )
+                if (projection != null) {
+                    viewModel.startRecording(projection)
+                } else {
+                    viewModel.showMessage("Could not initialize system sound capture")
+                }
+            }
+        } else {
+            viewModel.showMessage("System sound capture permission was cancelled")
+        }
+    }
+
+    val startRecordingWithSystemAudioCheck: () -> Unit = {
+        if (viewModel.needsSystemAudioCapture()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val projMgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                systemAudioLauncher.launch(projMgr.createScreenCaptureIntent())
+            } else {
+                viewModel.showMessage("System sound recording requires Android 10 or higher.")
+            }
+        } else {
+            viewModel.startRecording()
+        }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -133,6 +178,12 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
         hasRecordPermission = granted
         if (granted) {
             viewModel.refreshInputs()
+            if (pendingRecordAfterPermission) {
+                pendingRecordAfterPermission = false
+                startRecordingWithSystemAudioCheck()
+            }
+        } else {
+            pendingRecordAfterPermission = false
         }
     }
 
@@ -179,13 +230,18 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
                 masterMeterLeft = masterMeterLevel.first,
                 masterMeterRight = masterMeterLevel.second,
                 onRecordToggle = {
-                    val needsMic = session.tracks.any {
-                        it.isArmed && it.type == com.example.model.TrackType.AUDIO
-                    }
-                    if (needsMic && !hasRecordPermission) {
-                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    if (isRecording) {
+                        viewModel.stopRecording()
                     } else {
-                        if (isRecording) viewModel.stopRecording() else viewModel.startRecording()
+                        val needsMic = session.tracks.any {
+                            it.isArmed && it.type == com.example.model.TrackType.AUDIO
+                        }
+                        if (needsMic && !hasRecordPermission) {
+                            pendingRecordAfterPermission = true
+                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        } else {
+                            startRecordingWithSystemAudioCheck()
+                        }
                     }
                 },
                 onPlayPauseToggle = { viewModel.togglePlayPause() },

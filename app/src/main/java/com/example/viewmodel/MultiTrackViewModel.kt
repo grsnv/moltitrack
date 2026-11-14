@@ -1,6 +1,7 @@
 package com.example.viewmodel
 
 import android.app.Application
+import android.media.projection.MediaProjection
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioExporter
@@ -8,8 +9,10 @@ import com.example.audio.AudioInputManager
 import com.example.audio.MidiTimelineHelper
 import com.example.audio.MultiTrackPlayerEngine
 import com.example.audio.MultiTrackRecorderEngine
+import com.example.audio.SystemAudioCaptureService
 import com.example.audio.UsbAudioInterfaceManager
 import com.example.audio.WavHelper
+import com.example.model.AudioInputConstants
 import com.example.model.AudioInputDevice
 import com.example.model.InputChannelMode
 import com.example.model.MidiActivityEvent
@@ -20,6 +23,7 @@ import com.example.model.RecordedMidiEvent
 import com.example.model.RecordingSession
 import com.example.model.TrackModel
 import com.example.model.TrackType
+import com.example.model.requiresSystemAudioCapture
 import com.example.ui.theme.TrackColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -89,6 +93,11 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
 
     init {
         File(getApplication<Application>().filesDir, "sessions").apply { mkdirs() }
+        SystemAudioCaptureService.onProjectionStopped = {
+            if (isRecording.value) {
+                stopRecording()
+            }
+        }
     }
 
     private fun createDefaultSession(): RecordingSession {
@@ -121,7 +130,14 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         )
     }
 
-    fun startRecording(): Boolean {
+    fun needsSystemAudioCapture(): Boolean =
+        _currentSession.value.tracks.requiresSystemAudioCapture()
+
+    fun showMessage(message: String) {
+        _userMessage.value = message
+    }
+
+    fun startRecording(mediaProjection: MediaProjection? = null): Boolean {
         if (isPlaying.value) {
             playerEngine.stop()
         }
@@ -138,7 +154,8 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
         val started = recorderEngine.startRecording(
             tracksToRecord = session.tracks,
             availableDevices = availableInputs.value,
-            sessionDir = sessionDir
+            sessionDir = sessionDir,
+            mediaProjection = mediaProjection
         ) { recordedFiles ->
             onRecordingComplete(recordedFiles)
         }
@@ -152,9 +169,11 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
     fun stopRecording() {
         activeRecordingNotes.clear()
         recorderEngine.stopRecording()
+        SystemAudioCaptureService.stopCapture(getApplication())
     }
 
     private fun onRecordingComplete(recordedFiles: Map<String, File>) {
+        SystemAudioCaptureService.stopCapture(getApplication())
         viewModelScope.launch(Dispatchers.IO) {
             val updatedTracks = _currentSession.value.tracks.map { track ->
                 val audioFile = recordedFiles[track.id]
@@ -734,6 +753,8 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
 
     override fun onCleared() {
         super.onCleared()
+        SystemAudioCaptureService.onProjectionStopped = null
+        SystemAudioCaptureService.stopCapture(getApplication())
         inputManager.release()
         usbInterfaceManager.release()
         midiManager.release()

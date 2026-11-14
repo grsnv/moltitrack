@@ -11,7 +11,13 @@ enum class AudioInputType {
     USB_AUDIO,
     WIRED_HEADSET,
     BLUETOOTH,
+    SYSTEM_AUDIO,
     DEFAULT
+}
+
+object AudioInputConstants {
+    const val DEFAULT_MIC_ID = "default_mic"
+    const val SYSTEM_AUDIO_ID = "system_audio_playback"
 }
 
 enum class InputChannelMode(val label: String, val shortLabel: String) {
@@ -216,6 +222,9 @@ data class TrackModel(
         }
     }
 
+    fun isSystemAudioInput(): Boolean =
+        type == TrackType.AUDIO && inputDeviceId == AudioInputConstants.SYSTEM_AUDIO_ID
+
     fun matchesMidiInput(sourceId: String, channel: Int): Boolean {
         if (type != TrackType.MIDI || !isArmed) return false
         val deviceMatches = when (inputDeviceId) {
@@ -229,6 +238,9 @@ data class TrackModel(
         return deviceMatches && channelMatches
     }
 }
+
+fun Collection<TrackModel>.requiresSystemAudioCapture(): Boolean =
+    any { it.isArmed && it.isSystemAudioInput() }
 
 data class RecordingSession(
     val id: String,
