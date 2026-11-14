@@ -6,3 +6,14 @@ plugins {
   alias(libs.plugins.secrets) apply false
   alias(libs.plugins.google.services) apply false
 }
+
+val copyDebugApk =
+  tasks.register<Copy>("copyDebugApk") {
+    from(project(":app").layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+    into(layout.projectDirectory.dir("build-outputs"))
+  }
+
+subprojects {
+  tasks.matching { it.name == "assembleDebug" }.configureEach { finalizedBy(copyDebugApk) }
+}
+
