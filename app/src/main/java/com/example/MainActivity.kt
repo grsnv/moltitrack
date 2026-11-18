@@ -718,14 +718,23 @@ fun MainStudioScreen(viewModel: MultiTrackViewModel = viewModel()) {
             onAddNote = { note ->
                 viewModel.addMidiNoteToTrack(latestTrack.id, note)
             },
+            onUpdateNote = { updatedNote ->
+                viewModel.updateMidiNoteInTrack(latestTrack.id, updatedNote)
+            },
             onRemoveNote = { noteId ->
                 viewModel.removeMidiNoteFromTrack(latestTrack.id, noteId)
+            },
+            onUpdateMidiEvent = { updatedEvent ->
+                viewModel.updateMidiEventInTrack(latestTrack.id, updatedEvent)
+            },
+            onRemoveMidiEvent = { eventId ->
+                viewModel.removeMidiEventFromTrack(latestTrack.id, eventId)
             },
             onClearNotes = {
                 viewModel.clearMidiNotes(latestTrack.id)
             },
-            onAuditionNote = { noteNumber ->
-                viewModel.auditionMidiNote(latestTrack, noteNumber)
+            onAuditionNote = { noteNumber, velocity, channel ->
+                viewModel.auditionMidiNote(latestTrack, noteNumber, velocity, channel)
             },
             onOpenMidiRouting = {
                 midiRoutingTrackTarget = latestTrack

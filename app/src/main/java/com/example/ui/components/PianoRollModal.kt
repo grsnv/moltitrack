@@ -22,12 +22,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -47,6 +47,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,6 +63,7 @@ import com.example.audio.MidiCcNames
 import com.example.audio.UsbMidiDeviceItem
 import com.example.model.MidiEventType
 import com.example.model.MidiNote
+import com.example.model.RecordedMidiEvent
 import com.example.model.TrackModel
 import com.example.ui.theme.StudioBorder
 import com.example.ui.theme.StudioCard
@@ -86,14 +88,20 @@ fun PianoRollModal(
     isRecording: Boolean,
     currentTimeMs: Long,
     onAddNote: (MidiNote) -> Unit,
+    onUpdateNote: (MidiNote) -> Unit,
     onRemoveNote: (String) -> Unit,
+    onUpdateMidiEvent: (RecordedMidiEvent) -> Unit,
+    onRemoveMidiEvent: (String) -> Unit,
     onClearNotes: () -> Unit,
-    onAuditionNote: (Int) -> Unit,
+    onAuditionNote: (noteNumber: Int, velocity: Int, channel: Int?) -> Unit,
     onOpenMidiRouting: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var selectedOctave by remember { mutableIntStateOf(4) } // Default Octave 4 (Middle C is 60)
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Touch Keys, 1 = Notes, 2 = MIDI Params
+    var editingNote by remember { mutableStateOf<MidiNote?>(null) }
+    var isAddingNewNote by remember { mutableStateOf(false) }
+    var editingEvent by remember { mutableStateOf<RecordedMidiEvent?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -161,7 +169,7 @@ fun PianoRollModal(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(430.dp)
+                    .height(470.dp)
             ) {
                 // MIDI input / parameter status chip
                 Surface(
@@ -275,7 +283,7 @@ fun PianoRollModal(
                         VirtualTouchKeyboard(
                             baseOctave = selectedOctave,
                             onKeyPress = { noteNumber ->
-                                onAuditionNote(noteNumber)
+                                onAuditionNote(noteNumber, 100, null)
                                 val noteTime = if (isRecording) currentTimeMs else 0L
                                 val outCh = if (track.midiChannel in 1..16) track.midiChannel else 1
                                 onAddNote(
@@ -305,26 +313,51 @@ fun PianoRollModal(
                     }
 
                     1 -> {
-                        // TAB 1: RECORDED MIDI NOTES
+                        // TAB 1: RECORDED MIDI NOTES + VISUAL PIANO ROLL EDITOR
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "${track.midiNotes.size} Recorded Note(s)",
+                                text = "${track.midiNotes.size} Note(s)",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = StudioTextSecondary
                             )
-                            if (track.midiNotes.isNotEmpty() || track.midiEvents.isNotEmpty()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
                                 TextButton(
-                                    onClick = onClearNotes,
-                                    colors = ButtonDefaults.textButtonColors(contentColor = StudioRed)
+                                    onClick = {
+                                        val defaultCh = if (track.midiChannel in 1..16) track.midiChannel else 1
+                                        val nextStart = track.midiNotes.maxOfOrNull { it.startMs + it.durationMs } ?: 0L
+                                        isAddingNewNote = true
+                                        editingNote = MidiNote(
+                                            noteNumber = (selectedOctave + 1) * 12,
+                                            startMs = nextStart,
+                                            durationMs = 500L,
+                                            velocity = 100,
+                                            channel = defaultCh
+                                        )
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(contentColor = StudioCyan),
+                                    modifier = Modifier.testTag("add_piano_roll_note_btn")
                                 ) {
-                                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Clear All MIDI", fontSize = 11.sp)
+                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Text("Add Note", fontSize = 11.sp)
+                                }
+                                if (track.midiNotes.isNotEmpty() || track.midiEvents.isNotEmpty()) {
+                                    TextButton(
+                                        onClick = onClearNotes,
+                                        colors = ButtonDefaults.textButtonColors(contentColor = StudioRed)
+                                    ) {
+                                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(2.dp))
+                                        Text("Clear", fontSize = 11.sp)
+                                    }
                                 }
                             }
                         }
@@ -335,7 +368,7 @@ fun PianoRollModal(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(220.dp)
+                                    .weight(1f)
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(StudioDark),
                                 contentAlignment = Alignment.Center
@@ -344,20 +377,41 @@ fun PianoRollModal(
                                     Icon(Icons.Default.Piano, null, tint = StudioTextMuted, modifier = Modifier.size(36.dp))
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text("No MIDI notes recorded yet", color = StudioTextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                    Text("Route MIDI from another app or USB controller & press REC", color = StudioTextMuted, fontSize = 11.sp)
+                                    Text("Route MIDI, press REC, or tap + Add Note above", color = StudioTextMuted, fontSize = 11.sp)
                                 }
                             }
                         } else {
-                            Column(
+                            val orderedNotes = remember(track.midiNotes) {
+                                track.midiNotes.sortedWith(compareBy<MidiNote>({ it.startMs }, { it.noteNumber }))
+                            }
+
+                            PianoRollGridView(
+                                notes = orderedNotes,
+                                trackColor = track.color,
+                                selectedNoteId = editingNote?.id,
+                                onSelectNoteForEdit = { note ->
+                                    onAuditionNote(note.noteNumber, note.velocity, note.channel)
+                                    isAddingNewNote = false
+                                    editingNote = note
+                                }
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            LazyColumn(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .weight(1f)
-                                    .verticalScroll(rememberScrollState()),
+                                    .weight(1f),
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                track.midiNotes.sortedBy { it.startMs }.forEach { note ->
+                                items(orderedNotes, key = { it.id }) { note ->
                                     Surface(
-                                        modifier = Modifier.fillMaxWidth(),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                isAddingNewNote = false
+                                                editingNote = note
+                                            },
                                         color = StudioCardElevated,
                                         shape = RoundedCornerShape(6.dp),
                                         border = BorderStroke(1.dp, StudioBorder)
@@ -365,14 +419,17 @@ fun PianoRollModal(
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
                                                 Box(
                                                     modifier = Modifier
-                                                        .size(24.dp)
+                                                        .size(26.dp)
                                                         .clip(RoundedCornerShape(4.dp))
                                                         .background(track.color),
                                                     contentAlignment = Alignment.Center
@@ -384,11 +441,11 @@ fun PianoRollModal(
                                                         color = Color.White
                                                     )
                                                 }
-                                                Spacer(modifier = Modifier.width(10.dp))
+                                                Spacer(modifier = Modifier.width(8.dp))
                                                 Column {
                                                     Text(
                                                         text = "${note.noteName} (#${note.noteNumber}) • Ch ${note.channel} • Vel ${note.velocity}",
-                                                        fontSize = 12.sp,
+                                                        fontSize = 11.sp,
                                                         fontWeight = FontWeight.Bold,
                                                         color = StudioTextPrimary
                                                     )
@@ -404,16 +461,29 @@ fun PianoRollModal(
 
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 IconButton(
-                                                    onClick = { onAuditionNote(note.noteNumber) },
-                                                    modifier = Modifier.size(28.dp)
+                                                    onClick = { onAuditionNote(note.noteNumber, note.velocity, note.channel) },
+                                                    modifier = Modifier.size(30.dp)
                                                 ) {
                                                     Icon(Icons.Default.PlayArrow, "Preview note", tint = StudioCyan, modifier = Modifier.size(16.dp))
                                                 }
                                                 IconButton(
-                                                    onClick = { onRemoveNote(note.id) },
-                                                    modifier = Modifier.size(28.dp)
+                                                    onClick = {
+                                                        isAddingNewNote = false
+                                                        editingNote = note
+                                                    },
+                                                    modifier = Modifier
+                                                        .size(30.dp)
+                                                        .testTag("edit_note_btn_${note.id}")
                                                 ) {
-                                                    Icon(Icons.Default.Delete, "Delete note", tint = StudioRed, modifier = Modifier.size(16.dp))
+                                                    Icon(Icons.Default.Edit, "Edit note", tint = StudioYellow, modifier = Modifier.size(15.dp))
+                                                }
+                                                IconButton(
+                                                    onClick = { onRemoveNote(note.id) },
+                                                    modifier = Modifier
+                                                        .size(30.dp)
+                                                        .testTag("delete_note_btn_${note.id}")
+                                                ) {
+                                                    Icon(Icons.Default.Delete, "Delete note", tint = StudioRed, modifier = Modifier.size(15.dp))
                                                 }
                                             }
                                         }
@@ -523,7 +593,9 @@ fun PianoRollModal(
                                             MidiEventType.CHANNEL_PRESSURE, MidiEventType.POLY_PRESSURE -> StudioGreen
                                         }
                                         Surface(
-                                            modifier = Modifier.fillMaxWidth(),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { editingEvent = evt },
                                             color = StudioCard,
                                             shape = RoundedCornerShape(5.dp),
                                             border = BorderStroke(1.dp, StudioBorder)
@@ -535,13 +607,16 @@ fun PianoRollModal(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.SpaceBetween
                                             ) {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
                                                     Text(
                                                         text = String.format(Locale.US, "%.2fs", evt.timestampMs / 1000.0),
                                                         fontSize = 10.sp,
                                                         fontFamily = FontFamily.Monospace,
                                                         color = StudioTextMuted,
-                                                        modifier = Modifier.width(44.dp)
+                                                        modifier = Modifier.width(42.dp)
                                                     )
                                                     Box(
                                                         modifier = Modifier
@@ -558,17 +633,29 @@ fun PianoRollModal(
                                                     }
                                                     Spacer(modifier = Modifier.width(6.dp))
                                                     Text(
-                                                        text = evt.describe(),
+                                                        text = "${evt.describe()} • Ch ${evt.channel}",
                                                         fontSize = 11.sp,
                                                         color = StudioTextPrimary
                                                     )
                                                 }
-                                                Text(
-                                                    text = "Ch ${evt.channel}",
-                                                    fontSize = 10.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    color = StudioTextSecondary
-                                                )
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    IconButton(
+                                                        onClick = { editingEvent = evt },
+                                                        modifier = Modifier
+                                                            .size(26.dp)
+                                                            .testTag("edit_event_btn_${evt.id}")
+                                                    ) {
+                                                        Icon(Icons.Default.Edit, "Edit event", tint = StudioYellow, modifier = Modifier.size(14.dp))
+                                                    }
+                                                    IconButton(
+                                                        onClick = { onRemoveMidiEvent(evt.id) },
+                                                        modifier = Modifier
+                                                            .size(26.dp)
+                                                            .testTag("delete_event_btn_${evt.id}")
+                                                    ) {
+                                                        Icon(Icons.Default.Delete, "Delete event", tint = StudioRed, modifier = Modifier.size(14.dp))
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -590,6 +677,48 @@ fun PianoRollModal(
         containerColor = StudioSurface,
         shape = RoundedCornerShape(16.dp)
     )
+
+    editingNote?.let { targetNote ->
+        EditMidiNoteDialog(
+            initialNote = targetNote,
+            isNewNote = isAddingNewNote,
+            onPreviewNote = { n, v, ch -> onAuditionNote(n, v, ch) },
+            onSave = { updated ->
+                if (isAddingNewNote) {
+                    onAddNote(updated)
+                } else {
+                    onUpdateNote(updated)
+                }
+                editingNote = null
+                isAddingNewNote = false
+            },
+            onDelete = if (isAddingNewNote) null else {
+                {
+                    onRemoveNote(targetNote.id)
+                    editingNote = null
+                }
+            },
+            onDismiss = {
+                editingNote = null
+                isAddingNewNote = false
+            }
+        )
+    }
+
+    editingEvent?.let { targetEvent ->
+        EditMidiEventDialog(
+            initialEvent = targetEvent,
+            onSave = { updated ->
+                onUpdateMidiEvent(updated)
+                editingEvent = null
+            },
+            onDelete = {
+                onRemoveMidiEvent(targetEvent.id)
+                editingEvent = null
+            },
+            onDismiss = { editingEvent = null }
+        )
+    }
 }
 
 @Composable

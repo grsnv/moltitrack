@@ -60,15 +60,23 @@ data class MidiNote(
     val startMs: Long = 0L,
     val durationMs: Long = 500L,
     val velocity: Int = 100, // 1..127
-    val channel: Int = 1 // 1..16
+    val channel: Int = 1, // 1..16
+    val noteOnEventId: String? = null,
+    val noteOffEventId: String? = null
 ) {
     val noteName: String
-        get() {
-            val names = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
-            val octave = (noteNumber / 12) - 1
-            val name = names[noteNumber.coerceIn(0, 127) % 12]
+        get() = noteNameFor(noteNumber)
+
+    companion object {
+        private val NOTE_NAMES = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+        fun noteNameFor(noteNumber: Int): String {
+            val clamped = noteNumber.coerceIn(0, 127)
+            val octave = (clamped / 12) - 1
+            val name = NOTE_NAMES[clamped % 12]
             return "$name$octave"
         }
+    }
 }
 
 data class RecordedMidiEvent(

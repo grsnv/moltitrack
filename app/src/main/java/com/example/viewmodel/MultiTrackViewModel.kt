@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioExporter
 import com.example.audio.AudioInputManager
 import com.example.audio.MidiTimelineHelper
+import com.example.audio.MidiTrackEditor
 import com.example.audio.MultiTrackPlayerEngine
 import com.example.audio.MultiTrackRecorderEngine
 import com.example.audio.SystemAudioCaptureService
@@ -308,32 +309,36 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun addMidiNoteToTrack(trackId: String, note: MidiNote) {
-        val currentTracks = _currentSession.value.tracks
-        val target = currentTracks.firstOrNull { it.id == trackId } ?: return
-        val newNotes = target.midiNotes + note
-        val noteOnEvt = RecordedMidiEvent(
-            timestampMs = note.startMs,
-            channel = note.channel,
-            type = MidiEventType.NOTE_ON,
-            data1 = note.noteNumber,
-            data2 = note.velocity
-        )
-        val noteOffEvt = RecordedMidiEvent(
-            timestampMs = note.startMs + note.durationMs,
-            channel = note.channel,
-            type = MidiEventType.NOTE_OFF,
-            data1 = note.noteNumber,
-            data2 = 0
-        )
-        val newEvents = target.midiEvents + noteOnEvt + noteOffEvt
-        updateMidiTimeline(target.id, newNotes, newEvents)
+        mutateMidiTrack(trackId) { track -> MidiTrackEditor.addNote(track, note) }
+    }
+
+    fun updateMidiNoteInTrack(trackId: String, updatedNote: MidiNote) {
+        mutateMidiTrack(trackId) { track -> MidiTrackEditor.updateNote(track, updatedNote) }
+        _userMessage.value = "Updated note ${updatedNote.noteName}"
     }
 
     fun removeMidiNoteFromTrack(trackId: String, noteId: String) {
+        mutateMidiTrack(trackId) { track -> MidiTrackEditor.removeNote(track, noteId) }
+    }
+
+    fun updateMidiEventInTrack(trackId: String, updatedEvent: RecordedMidiEvent) {
+        mutateMidiTrack(trackId) { track -> MidiTrackEditor.updateMidiEvent(track, updatedEvent) }
+        _userMessage.value = "Updated ${updatedEvent.type.shortLabel} parameter"
+    }
+
+    fun removeMidiEventFromTrack(trackId: String, eventId: String) {
+        mutateMidiTrack(trackId) { track -> MidiTrackEditor.removeMidiEvent(track, eventId) }
+    }
+
+    private fun mutateMidiTrack(trackId: String, transform: (TrackModel) -> TrackModel) {
         val currentTracks = _currentSession.value.tracks
-        val target = currentTracks.firstOrNull { it.id == trackId } ?: return
-        val newNotes = target.midiNotes.filter { it.id != noteId }
-        updateMidiTimeline(target.id, newNotes, target.midiEvents)
+        if (currentTracks.none { it.id == trackId }) return
+        val updatedTracks = currentTracks.map { if (it.id == trackId) transform(it) else it }
+        val maxDur = updatedTracks.maxOfOrNull { it.durationMs } ?: 0L
+        _currentSession.value = _currentSession.value.copy(
+            tracks = updatedTracks,
+            durationMs = maxDur
+        )
     }
 
     fun clearMidiNotes(trackId: String) {
@@ -350,48 +355,39 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
             latestPitchBend = 8192,
             latestAftertouch = 0
         )
+        val updatedTracks = currentTracks.map { if (it.id == trackId) clearedTrack else it }
         _currentSession.value = _currentSession.value.copy(
-            tracks = currentTracks.map { if (it.id == trackId) clearedTrack else it }
+            tracks = updatedTracks,
+            durationMs = updatedTracks.maxOfOrNull { it.durationMs } ?: 0L
         )
         _userMessage.value = "Cleared all recorded MIDI notes & parameters"
     }
 
-    private fun updateMidiTimeline(
-        trackId: String,
-        notes: List<MidiNote>,
-        events: List<RecordedMidiEvent>
+    fun auditionMidiNote(
+        track: TrackModel,
+        noteNumber: Int,
+        velocity: Int = 100,
+        channelOverride: Int? = null
     ) {
-        val activity = MidiTimelineHelper.extractActivityPoints(notes, events)
-        val duration = MidiTimelineHelper.computeMidiDurationMs(notes, events)
-        _currentSession.value = _currentSession.value.copy(
-            tracks = _currentSession.value.tracks.map {
-                if (it.id == trackId) {
-                    it.copy(
-                        audioFilePath = null,
-                        midiNotes = notes,
-                        midiEvents = events,
-                        waveformPoints = activity,
-                        durationMs = duration
-                    )
-                } else it
-            }
-        )
-    }
-
-    fun auditionMidiNote(track: TrackModel, noteNumber: Int, velocity: Int = 100) {
-        val outChannel = if (track.midiChannel in 1..16) track.midiChannel else 1
+        val outChannel = when {
+            channelOverride != null && channelOverride in 1..16 -> channelOverride
+            track.midiChannel in 1..16 -> track.midiChannel
+            else -> 1
+        }
+        val safeNote = noteNumber.coerceIn(0, 127)
+        val safeVel = velocity.coerceIn(1, 127)
         val outTarget = track.resolveMidiOutputTarget()
         midiManager.sendNoteOn(
             channel = outChannel,
-            note = noteNumber,
-            velocity = velocity,
+            note = safeNote,
+            velocity = safeVel,
             targetDeviceKey = outTarget
         )
         viewModelScope.launch {
             delay(350)
             midiManager.sendNoteOff(
                 channel = outChannel,
-                note = noteNumber,
+                note = safeNote,
                 targetDeviceKey = outTarget
             )
         }
@@ -463,7 +459,8 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                             startMs = captureTimeMs,
                             durationMs = 300L,
                             velocity = event.data2.coerceIn(1, 127),
-                            channel = event.channel
+                            channel = event.channel,
+                            noteOnEventId = recordedEvt.id
                         )
                         activeRecordingNotes[Triple(track.id, event.channel, event.data1)] = note.id
                         track.midiNotes + note
@@ -473,7 +470,10 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                         if (openNoteId != null) {
                             track.midiNotes.map { existing ->
                                 if (existing.id == openNoteId) {
-                                    existing.copy(durationMs = max(60L, captureTimeMs - existing.startMs))
+                                    existing.copy(
+                                        durationMs = max(60L, captureTimeMs - existing.startMs),
+                                        noteOffEventId = recordedEvt.id
+                                    )
                                 } else existing
                             }
                         } else {
@@ -656,28 +656,39 @@ class MultiTrackViewModel(application: Application) : AndroidViewModel(applicati
                 durationMs = 10000L
             )
 
+            val n1On = RecordedMidiEvent(timestampMs = 0L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 60, data2 = 105)
+            val n1Off = RecordedMidiEvent(timestampMs = 450L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 60, data2 = 0)
+            val n2On = RecordedMidiEvent(timestampMs = 500L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 64, data2 = 98)
+            val n2Off = RecordedMidiEvent(timestampMs = 950L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 64, data2 = 0)
+            val n3On = RecordedMidiEvent(timestampMs = 1000L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 67, data2 = 112)
+            val n3Off = RecordedMidiEvent(timestampMs = 1450L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 67, data2 = 0)
+            val n4On = RecordedMidiEvent(timestampMs = 1500L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 71, data2 = 104)
+            val n4Off = RecordedMidiEvent(timestampMs = 1950L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 71, data2 = 0)
+            val n5On = RecordedMidiEvent(timestampMs = 2000L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 72, data2 = 120)
+            val n5Off = RecordedMidiEvent(timestampMs = 2800L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 72, data2 = 0)
+
             val demoMidiNotes = listOf(
-                MidiNote(noteNumber = 60, startMs = 0L, durationMs = 450L, velocity = 105, channel = 1),
-                MidiNote(noteNumber = 64, startMs = 500L, durationMs = 450L, velocity = 98, channel = 1),
-                MidiNote(noteNumber = 67, startMs = 1000L, durationMs = 450L, velocity = 112, channel = 1),
-                MidiNote(noteNumber = 71, startMs = 1500L, durationMs = 450L, velocity = 104, channel = 1),
-                MidiNote(noteNumber = 72, startMs = 2000L, durationMs = 800L, velocity = 120, channel = 1)
+                MidiNote(noteNumber = 60, startMs = 0L, durationMs = 450L, velocity = 105, channel = 1, noteOnEventId = n1On.id, noteOffEventId = n1Off.id),
+                MidiNote(noteNumber = 64, startMs = 500L, durationMs = 450L, velocity = 98, channel = 1, noteOnEventId = n2On.id, noteOffEventId = n2Off.id),
+                MidiNote(noteNumber = 67, startMs = 1000L, durationMs = 450L, velocity = 112, channel = 1, noteOnEventId = n3On.id, noteOffEventId = n3Off.id),
+                MidiNote(noteNumber = 71, startMs = 1500L, durationMs = 450L, velocity = 104, channel = 1, noteOnEventId = n4On.id, noteOffEventId = n4Off.id),
+                MidiNote(noteNumber = 72, startMs = 2000L, durationMs = 800L, velocity = 120, channel = 1, noteOnEventId = n5On.id, noteOffEventId = n5Off.id)
             )
             val demoMidiEvents = listOf(
                 RecordedMidiEvent(timestampMs = 0L, channel = 1, type = MidiEventType.CONTROL_CHANGE, data1 = 1, data2 = 42),
-                RecordedMidiEvent(timestampMs = 0L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 60, data2 = 105),
-                RecordedMidiEvent(timestampMs = 450L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 60, data2 = 0),
-                RecordedMidiEvent(timestampMs = 500L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 64, data2 = 98),
-                RecordedMidiEvent(timestampMs = 950L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 64, data2 = 0),
+                n1On,
+                n1Off,
+                n2On,
+                n2Off,
                 RecordedMidiEvent(timestampMs = 1000L, channel = 1, type = MidiEventType.PITCH_BEND, data1 = 9200, data2 = 0),
-                RecordedMidiEvent(timestampMs = 1000L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 67, data2 = 112),
-                RecordedMidiEvent(timestampMs = 1450L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 67, data2 = 0),
+                n3On,
+                n3Off,
                 RecordedMidiEvent(timestampMs = 1500L, channel = 1, type = MidiEventType.PITCH_BEND, data1 = 8192, data2 = 0),
-                RecordedMidiEvent(timestampMs = 1500L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 71, data2 = 104),
-                RecordedMidiEvent(timestampMs = 1950L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 71, data2 = 0),
+                n4On,
+                n4Off,
                 RecordedMidiEvent(timestampMs = 2000L, channel = 1, type = MidiEventType.CONTROL_CHANGE, data1 = 64, data2 = 127),
-                RecordedMidiEvent(timestampMs = 2000L, channel = 1, type = MidiEventType.NOTE_ON, data1 = 72, data2 = 120),
-                RecordedMidiEvent(timestampMs = 2800L, channel = 1, type = MidiEventType.NOTE_OFF, data1 = 72, data2 = 0),
+                n5On,
+                n5Off,
                 RecordedMidiEvent(timestampMs = 2900L, channel = 1, type = MidiEventType.CONTROL_CHANGE, data1 = 64, data2 = 0)
             )
 
